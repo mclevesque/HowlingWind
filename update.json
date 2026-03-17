@@ -1,5 +1,5 @@
 {
   "version": "0.1.0",
-  "url": "",
-  "notes": "Initial release"
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.0/HowlingWind-v0.1.0.zip",
+  "notes": "Initial release - lobby system, rollback netcode, auto-updater"
 }
