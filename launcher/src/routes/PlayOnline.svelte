@@ -62,6 +62,10 @@
   let directIp = $state("");
   let localPort = $state(0);
   let netplayStatus = $state("");
+
+  // Rejoin support — remember last room after disconnect
+  let lastRoomId = $state("");
+  let lastRoomCode = $state("");
   let localReady = $state(false); // Guest's local ready state
   let unsubStartSignal: (() => void) | null = null; // Guest listens for host's start signal
 
@@ -382,7 +386,10 @@
 
   function leaveLobby() {
     cancelConnection(); // Always reset connection state when leaving
+    // Save room info for rejoin
     if (currentRoomId) {
+      lastRoomId = currentRoomId;
+      lastRoomCode = currentRoom?.code || "";
       leaveRoom(currentRoomId, playerId, isHost);
     }
     if (unsubRoom) unsubRoom();
@@ -393,6 +400,23 @@
     isHost = false;
     // Stop voice chat when leaving lobby
     emit("voice-chat-stop", {});
+  }
+
+  async function rejoinLastRoom() {
+    if (!lastRoomCode) return;
+    error = "";
+    try {
+      const result = await joinRoom(lastRoomCode, playerId, playerName);
+      if (result.roomId) {
+        await enterRoom(result.roomId, false);
+        lastRoomId = "";
+        lastRoomCode = "";
+      }
+    } catch (e: any) {
+      error = `Rejoin failed: ${e}`;
+      lastRoomId = "";
+      lastRoomCode = "";
+    }
   }
 
   /** Guest clicks READY — mark ready in Firebase and listen for host's start signal. */
@@ -458,9 +482,11 @@
     netplayStatus = "Launching Dolphin...";
     try {
       await invoke("launch_dolphin", { mode: "netplay", isoOverride: null });
+      netplayStatus = "Dolphin launched! Waiting for game...";
     } catch (e: any) {
       netplayStatus = `Failed to launch Dolphin: ${e}`;
       error = `Dolphin launch error: ${e}`;
+      console.error("[PlayOnline] launch_dolphin failed:", e);
       return false;
     }
 
@@ -868,6 +894,15 @@
         </div>
         <button class="btn-disconnect" onclick={disconnect}>Disconnect</button>
       </div>
+
+      <!-- Rejoin banner -->
+      {#if lastRoomCode && !currentRoomId}
+        <div class="rejoin-banner">
+          <span>You left room <strong>{lastRoomCode}</strong></span>
+          <button class="btn btn-primary btn-sm" onclick={rejoinLastRoom}>REJOIN</button>
+          <button class="btn-dismiss" onclick={() => { lastRoomId = ""; lastRoomCode = ""; }}>x</button>
+        </div>
+      {/if}
 
       <!-- Mode Toggle -->
       <div class="mode-toggle">
@@ -1370,4 +1405,37 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
   }
+
+  /* Rejoin banner */
+  .rejoin-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: linear-gradient(135deg, rgba(234, 179, 8, 0.1), rgba(234, 179, 8, 0.05));
+    border: 1px solid rgba(234, 179, 8, 0.3);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #ccc;
+  }
+  .rejoin-banner strong {
+    color: var(--wind-cyan, #22d3ee);
+    font-family: 'Orbitron', monospace;
+    letter-spacing: 1px;
+  }
+  .btn-sm {
+    padding: 3px 10px !important;
+    font-size: 10px !important;
+  }
+  .btn-dismiss {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 14px;
+    cursor: pointer;
+    margin-left: auto;
+    padding: 0 4px;
+  }
+  .btn-dismiss:hover { color: #fff; }
 </style>

@@ -276,10 +276,10 @@
 </script>
 
 <!-- Custom title bar (frameless window) -->
-<div class="titlebar" data-tauri-drag-region>
-  <div class="titlebar-logo" data-tauri-drag-region>
+<div class="titlebar" onmousedown={(e) => { if ((e.target as HTMLElement).closest('.titlebar-controls')) return; appWindow.startDragging(); }}>
+  <div class="titlebar-logo">
     <span class="titlebar-icon">🌀</span>
-    <span class="titlebar-text" data-tauri-drag-region>HOWLINGWIND</span>
+    <span class="titlebar-text">HOWLINGWIND</span>
     {#if appVersion}<span class="titlebar-version">v{appVersion}</span>{/if}
   </div>
   <div class="titlebar-controls">

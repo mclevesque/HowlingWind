@@ -1410,6 +1410,9 @@ fn launch_dolphin(
 ) -> Result<(), String> {
     let settings = load_settings(&app);
 
+    diagnostics::log_info(&format!("launch_dolphin: mode={}, dolphin_path={}, iso_path={}",
+        mode, settings.dolphin_path, settings.iso_path));
+
     if settings.dolphin_path.is_empty() {
         return Err("Dolphin path not set. Go to Settings to configure it.".to_string());
     }
