@@ -1,5 +1,5 @@
 {
-  "version": "0.2.1",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.1/HowlingWind-v0.2.1.zip",
-  "notes": "v0.2.1 - Frameless window, voice chat, GC adapter support, Dolphin exit fix"
+  "version": "0.2.2",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.2/HowlingWind-v0.2.2.zip",
+  "notes": "v0.2.2 - Fix window drag, version bump for auto-updater"
 }

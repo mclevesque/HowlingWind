@@ -276,11 +276,23 @@
 </script>
 
 <!-- Custom title bar (frameless window) -->
-<div class="titlebar" onmousedown={(e) => { if ((e.target as HTMLElement).closest('.titlebar-controls')) return; appWindow.startDragging(); }}>
-  <div class="titlebar-logo">
-    <span class="titlebar-icon">🌀</span>
-    <span class="titlebar-text">HOWLINGWIND</span>
-    {#if appVersion}<span class="titlebar-version">v{appVersion}</span>{/if}
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="titlebar" data-tauri-drag-region
+  onmousedown={(e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.titlebar-controls') || target.closest('button')) return;
+    e.preventDefault();
+    appWindow.startDragging();
+  }}
+  ondblclick={(e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.titlebar-controls') || target.closest('button')) return;
+    toggleMaximize();
+  }}>
+  <div class="titlebar-logo" data-tauri-drag-region>
+    <span class="titlebar-icon" data-tauri-drag-region>🌀</span>
+    <span class="titlebar-text" data-tauri-drag-region>HOWLINGWIND</span>
+    {#if appVersion}<span class="titlebar-version" data-tauri-drag-region>v{appVersion}</span>{/if}
   </div>
   <div class="titlebar-controls">
     <button class="titlebar-btn" onclick={minimizeWindow} title="Minimize">
@@ -550,9 +562,10 @@
   }
   .titlebar-version {
     font-size: 9px;
-    color: var(--text-muted, #555);
+    color: #f97316;
     font-family: 'Orbitron', monospace;
     letter-spacing: 1px;
+    font-weight: 700;
   }
   .titlebar-controls {
     display: flex;
