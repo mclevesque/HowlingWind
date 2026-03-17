@@ -257,6 +257,7 @@ pub async fn download_update(app: tauri::AppHandle, url: String) -> Result<Strin
         r#"@echo off
 title HowlingWind Updater
 echo Applying update...
+
 :: Wait for the app to close
 :wait
 tasklist /FI "PID eq %1" 2>NUL | find /I "%1" >NUL
@@ -264,24 +265,42 @@ if not errorlevel 1 (
     timeout /t 1 /nobreak >NUL
     goto wait
 )
-:: Copy staging files over app directory (skip games folder to preserve user ISOs)
+
+:: Step 1: Backup ISOs from current games folder
+echo Preserving game ISOs...
+if not exist "{app_dir}\_iso_backup" mkdir "{app_dir}\_iso_backup"
+if exist "{app_dir}\games\*.iso" copy /Y "{app_dir}\games\*.iso" "{app_dir}\_iso_backup\" >NUL 2>&1
+if exist "{app_dir}\games\*.gcm" copy /Y "{app_dir}\games\*.gcm" "{app_dir}\_iso_backup\" >NUL 2>&1
+
+:: Step 2: Copy new exe (top-level files)
+echo Updating executable...
 for %%F in ("{staging}\*") do (
-    if not "%%~nxF"=="games" (
-        copy /Y "%%F" "{app_dir}\" >NUL 2>&1
-    )
+    copy /Y "%%F" "{app_dir}\" >NUL 2>&1
 )
-:: Copy subdirectories except games
+
+:: Step 3: Replace directories (delete old, copy new)
+echo Updating folders...
 for /D %%D in ("{staging}\*") do (
     if /I not "%%~nxD"=="games" (
+        if exist "{app_dir}\%%~nxD" rmdir /S /Q "{app_dir}\%%~nxD" >NUL 2>&1
         xcopy /E /Y /Q "%%D" "{app_dir}\%%~nxD\" >NUL 2>&1
     )
 )
-:: Ensure games directory exists but don't overwrite ISOs
+
+:: Step 4: Ensure games directory exists and restore ISOs
+echo Restoring game ISOs...
 if not exist "{app_dir}\games" mkdir "{app_dir}\games"
-:: Clean up
+if exist "{app_dir}\_iso_backup\*.iso" copy /Y "{app_dir}\_iso_backup\*.iso" "{app_dir}\games\" >NUL 2>&1
+if exist "{app_dir}\_iso_backup\*.gcm" copy /Y "{app_dir}\_iso_backup\*.gcm" "{app_dir}\games\" >NUL 2>&1
+rmdir /S /Q "{app_dir}\_iso_backup" >NUL 2>&1
+
+:: Step 5: Clean up staging
 rmdir /S /Q "{staging}" >NUL 2>&1
-:: Relaunch
+
+:: Step 6: Relaunch
+echo Update complete! Relaunching...
 start "" "{exe}"
+
 :: Delete this batch file
 del "%~f0"
 "#,
