@@ -823,6 +823,11 @@ pub fn rollback_start(
     netplay_state: tauri::State<'_, Arc<Mutex<NetplayState>>>,
     dolphin_proc_state: tauri::State<'_, Arc<Mutex<crate::DolphinState>>>,
 ) -> Result<String, String> {
+    crate::diagnostics::log_info(&format!(
+        "rollback_start called: player={}, delay={}, max_rb={}, ranked={}",
+        local_player, input_delay, max_rollback, ranked
+    ));
+
     let mut rs = state.lock().map_err(|e| e.to_string())?;
     rs.engine.config.input_delay = input_delay;
     rs.engine.config.max_rollback = max_rollback;
@@ -841,7 +846,7 @@ pub fn rollback_start(
 
     if let Some(ipc) = ipc_client {
         // ── IPC PATH: Use our Dolphin fork with true rollback ──
-        eprintln!("[rollback] Using IPC-based rollback (HowlingWind Dolphin fork)");
+        crate::diagnostics::log_info("Using IPC-based rollback (HowlingWind Dolphin fork)");
         let rb_clone = Arc::clone(&*state);
         let ds_clone = Arc::clone(&*dolphin_state);
         let np_clone = Arc::clone(&*netplay_state);
@@ -849,10 +854,18 @@ pub fn rollback_start(
         let handle = std::thread::Builder::new()
             .name("rollback-ipc-loop".to_string())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                crate::diagnostics::log_info("IPC rollback thread started, creating runtime...");
+                let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("Failed to create tokio runtime for IPC loop");
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        crate::diagnostics::log_error(&format!("Failed to create tokio runtime: {}", e));
+                        return;
+                    }
+                };
+                crate::diagnostics::log_info("Tokio runtime created, entering game loop...");
                 rt.block_on(crate::rollback_ipc::run_ipc_game_loop(
                     ipc, rb_clone, ds_clone, np_clone, local_player,
                 ));
