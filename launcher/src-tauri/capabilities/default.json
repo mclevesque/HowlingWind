@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasmoser/gnt-docs/main/.schemas/capability.json",
+  "identifier": "default",
+  "description": "Default capability for all windows",
+  "windows": ["main", "debug"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-create",
+    "core:webview:allow-create-webview-window",
+    "shell:allow-open",
+    "dialog:allow-open"
+  ]
+}
