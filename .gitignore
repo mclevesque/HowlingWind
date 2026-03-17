@@ -13,6 +13,16 @@ dist/HowlingWind/games/
 
 # Distribution zip (uploaded to GitHub Releases instead)
 dist/*.zip
+*.zip
+
+# HowlingWind Dolphin fork source (too large for git, built separately)
+howlingwind-dolphin/
+
+# Release staging (local packaging)
+release-staging/
+
+# Built distributions
+dist/
 
 # Debug output
 debug_report.txt

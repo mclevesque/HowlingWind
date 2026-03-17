@@ -32,6 +32,7 @@
     type LobbyRoom,
     type LobbyPlayer,
     type PlayerRating,
+    setGuestReady,
     type FriendRequest,
   } from "../lib/firebase";
 
@@ -60,6 +61,8 @@
   let directIp = $state("");
   let localPort = $state(0);
   let netplayStatus = $state("");
+  let localReady = $state(false); // Guest's local ready state
+  let unsubStartSignal: (() => void) | null = null; // Guest listens for host's start signal
 
   // Connection quality overlay
   let showOverlay = $state(true);
@@ -380,9 +383,41 @@
       leaveRoom(currentRoomId, playerId, isHost);
     }
     if (unsubRoom) unsubRoom();
+    if (unsubStartSignal) { unsubStartSignal(); unsubStartSignal = null; }
+    localReady = false;
     currentRoomId = "";
     currentRoom = null;
     isHost = false;
+  }
+
+  /** Guest clicks READY — mark ready in Firebase and listen for host's start signal. */
+  function readyUp() {
+    if (!currentRoomId) return;
+    localReady = true;
+    setGuestReady(currentRoomId, true);
+    playSfx("click");
+
+    // Listen ONLY for host's "start_game" signal (filter so we don't consume udp_ready)
+    unsubStartSignal = onSignals(currentRoomId, playerId, async (signal: any) => {
+      if (unsubStartSignal) { unsubStartSignal(); unsubStartSignal = null; }
+      startMatch(); // Guest auto-starts when host clicks START
+    }, "start_game");
+  }
+
+  function unreadyUp() {
+    if (!currentRoomId) return;
+    localReady = false;
+    setGuestReady(currentRoomId, false);
+    if (unsubStartSignal) { unsubStartSignal(); unsubStartSignal = null; }
+  }
+
+  /** Host clicks START MATCH — notify guest via signal, then both start. */
+  async function hostStartMatch() {
+    if (!currentRoomId) return;
+    // Send start signal to guest
+    await sendSignal(currentRoomId, playerId, { type: "start_game" });
+    // Host starts immediately
+    startMatch();
   }
 
   /** Cancel an in-progress connection attempt and reset to idle. */
@@ -390,6 +425,8 @@
     try { await invoke("netplay_stop"); } catch {}
     try { await invoke("dolphin_mem_detach"); } catch {}
     stopStatsPolling();
+    if (unsubStartSignal) { unsubStartSignal(); unsubStartSignal = null; }
+    localReady = false;
     connectionState = "idle";
     netplayStatus = "";
     localPort = 0;
@@ -415,8 +452,7 @@
 
     netplayStatus = "Launching Dolphin...";
     try {
-      // Don't pass isoOverride at all — let Rust use settings.iso_path
-      await invoke("launch_dolphin", { mode: "netplay" });
+      await invoke("launch_dolphin", { mode: "netplay", isoOverride: null });
     } catch (e: any) {
       netplayStatus = `Failed to launch Dolphin: ${e}`;
       error = `Dolphin launch error: ${e}`;
@@ -748,7 +784,7 @@
             <div class="room-player guest">
               <span class="player-badge guest-badge">GUEST</span>
               <span class="player-name">{currentRoom.guestName}</span>
-              <span class="player-ready">Ready</span>
+              <span class="player-ready" class:ready-glow={currentRoom.guestReady}>{currentRoom.guestReady ? "Ready!" : "Not Ready"}</span>
             </div>
           {:else}
             <div class="room-player empty">
@@ -760,10 +796,33 @@
 
         {#if currentRoom.status === "full"}
           {#if connectionState === "idle"}
-            <button class="btn btn-primary btn-start" onclick={startMatch}>
-              START MATCH
-            </button>
-            <p class="match-hint">P2P connection will be established automatically</p>
+            {#if isHost}
+              <!-- Host: can only start when guest is ready -->
+              {#if currentRoom.guestReady}
+                <button class="btn btn-primary btn-start" onclick={hostStartMatch}>
+                  START MATCH
+                </button>
+                <p class="match-hint">{currentRoom.guestName} is ready!</p>
+              {:else}
+                <button class="btn btn-start" disabled style="opacity: 0.4; cursor: not-allowed;">
+                  START MATCH
+                </button>
+                <p class="match-hint">Waiting for {currentRoom.guestName} to ready up...</p>
+              {/if}
+            {:else}
+              <!-- Guest: ready up button -->
+              {#if localReady}
+                <button class="btn btn-ready ready-active" onclick={unreadyUp}>
+                  READY!
+                </button>
+                <p class="match-hint">Waiting for host to start the match...</p>
+              {:else}
+                <button class="btn btn-primary btn-start" onclick={readyUp}>
+                  READY UP
+                </button>
+                <p class="match-hint">Click when you're ready to play</p>
+              {/if}
+            {/if}
           {:else}
             <div class="connection-status">
               {#if connectionState !== "playing"}<div class="spinner"></div>{/if}
@@ -1117,8 +1176,13 @@
   .player-badge { font-family: 'Orbitron', monospace; font-size: 9px; font-weight: 700; letter-spacing: 1px; padding: 3px 8px; border-radius: 4px; background: var(--accent-primary); color: white; }
   .guest-badge { background: var(--wind-cyan); }
   .player-name { font-size: 14px; font-weight: 600; color: var(--text-primary); }
-  .player-ready { margin-left: auto; font-size: 11px; color: #22c55e; font-weight: 600; }
+  .player-ready { margin-left: auto; font-size: 11px; color: var(--text-muted); font-weight: 600; }
+  .player-ready.ready-glow { color: #22c55e; text-shadow: 0 0 8px rgba(34, 197, 94, 0.5); }
   .btn-start { width: 100%; padding: 14px; font-size: 14px; }
+  .btn-ready { width: 100%; padding: 14px; font-size: 14px; font-family: 'Orbitron', monospace; letter-spacing: 2px; border-radius: 8px; border: 2px solid var(--wind-cyan, #22d3ee); background: transparent; color: var(--wind-cyan, #22d3ee); cursor: pointer; transition: all 0.2s; }
+  .btn-ready:hover { background: rgba(34, 211, 238, 0.1); }
+  .btn-ready.ready-active { background: var(--wind-cyan, #22d3ee); color: #000; animation: pulse-ready 1.5s ease-in-out infinite; }
+  @keyframes pulse-ready { 0%, 100% { box-shadow: 0 0 4px rgba(34, 211, 238, 0.3); } 50% { box-shadow: 0 0 16px rgba(34, 211, 238, 0.6); } }
   .match-hint { font-size: 11px; color: var(--text-muted); text-align: center; }
 
   /* Lobby browser */

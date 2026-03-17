@@ -188,7 +188,6 @@ impl InputBuffer {
     /// Record confirmed remote input. Returns true if this caused a prediction mismatch.
     pub fn add_remote(&mut self, frame: u32, input: FrameInput) -> bool {
         let mismatch = if let Some(predicted) = self.predicted.get(&frame) {
-            // Check if our prediction was wrong
             predicted.buttons != input.buttons
                 || predicted.stick_x != input.stick_x
                 || predicted.stick_y != input.stick_y
@@ -213,12 +212,10 @@ impl InputBuffer {
     /// Get the remote input for a frame, predicting if not yet received.
     /// Returns (input, is_predicted).
     pub fn get_remote(&mut self, frame: u32) -> (FrameInput, bool) {
-        // Check confirmed inputs first
         if let Some(input) = self.remote.get(&frame) {
             return (*input, false);
         }
 
-        // Check existing prediction
         if let Some(input) = self.predicted.get(&frame) {
             return (*input, true);
         }
@@ -232,13 +229,6 @@ impl InputBuffer {
 
         self.predicted.insert(frame, predicted);
         (predicted, true)
-    }
-
-    /// Find the earliest frame that had a wrong prediction (needs rollback from here).
-    pub fn earliest_misprediction(&self) -> Option<u32> {
-        // This would be called after add_remote returns true
-        // Find the minimum frame in remote that differs from predicted
-        None // Will be implemented with rollback engine
     }
 
     fn gc_old_frames(&mut self, current_frame: u32) {
@@ -268,6 +258,8 @@ pub struct NetplaySession {
     pub local_player_id: u8,  // 0 = P1, 1 = P2
     pub local_port: u16,
     pub peer_addr: Option<SocketAddr>,
+    /// Shared peer address — updated by set_peer(), read by send tasks
+    shared_peer_addr: Arc<RwLock<Option<SocketAddr>>>,
     pub input_buffer: InputBuffer,
     pub input_delay: u32,     // frames of intentional delay
     pub max_rollback: u32,    // max frames to rollback
@@ -275,19 +267,12 @@ pub struct NetplaySession {
     pub socket: Option<Arc<UdpSocket>>,
     pub send_tx: Option<mpsc::Sender<InputPacket>>,
     recv_rx: Option<mpsc::Receiver<InputPacket>>,
-    /// Channel for sending sync packets to peer
     pub sync_send_tx: Option<mpsc::Sender<SyncPacket>>,
-    /// Channel for received sync packets (desync detection)
     pub sync_rx: Option<mpsc::Receiver<SyncPacket>>,
-    /// Last desync info (frame, our hash, their hash)
     pub desync_info: Option<(u32, u32, u32)>,
-    /// Rolling average ping in milliseconds
     pub ping_ms: f64,
-    /// Timestamp (us) of last sent ping, for RTT calculation
     pub last_ping_sent_us: u64,
-    /// Channel for receiving pong timestamps
     pub pong_rx: Option<mpsc::Receiver<u64>>,
-    /// Channel for sending raw bytes (ping/pong packets)
     pub raw_send_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
@@ -298,7 +283,8 @@ impl NetplaySession {
             local_player_id: player_id,
             local_port: 0,
             peer_addr: None,
-            input_buffer: InputBuffer::new(max_rollback + 30), // keep extra history
+            shared_peer_addr: Arc::new(RwLock::new(None)),
+            input_buffer: InputBuffer::new(max_rollback + 30),
             input_delay,
             max_rollback,
             current_frame: 0,
@@ -343,12 +329,15 @@ impl NetplaySession {
         self.pong_rx = Some(pong_rx);
         self.raw_send_tx = Some(raw_send_tx);
 
+        // All send tasks share this — gets updated when set_peer() is called
+        let peer = self.shared_peer_addr.clone();
+
         // Spawn send task (input packets)
         let send_socket = socket.clone();
-        let peer_addr_send: Option<SocketAddr> = self.peer_addr;
+        let peer_for_input = peer.clone();
         tokio::spawn(async move {
             while let Some(packet) = send_rx.recv().await {
-                if let Some(addr) = peer_addr_send {
+                if let Some(addr) = *peer_for_input.read().await {
                     let data = packet.serialize();
                     let _ = send_socket.send_to(&data, addr).await;
                 }
@@ -357,10 +346,10 @@ impl NetplaySession {
 
         // Spawn sync send task (desync detection packets)
         let sync_send_socket = socket.clone();
-        let peer_addr_sync: Option<SocketAddr> = self.peer_addr;
+        let peer_for_sync = peer.clone();
         tokio::spawn(async move {
             while let Some(sync_packet) = sync_send_rx.recv().await {
-                if let Some(addr) = peer_addr_sync {
+                if let Some(addr) = *peer_for_sync.read().await {
                     let data = sync_packet.serialize();
                     let _ = sync_send_socket.send_to(&data, addr).await;
                 }
@@ -369,10 +358,10 @@ impl NetplaySession {
 
         // Spawn raw send task (ping/pong packets)
         let raw_send_socket = socket.clone();
-        let peer_addr_raw: Option<SocketAddr> = self.peer_addr;
+        let peer_for_raw = peer.clone();
         tokio::spawn(async move {
             while let Some(data) = raw_send_rx.recv().await {
-                if let Some(addr) = peer_addr_raw {
+                if let Some(addr) = *peer_for_raw.read().await {
                     let _ = raw_send_socket.send_to(&data, addr).await;
                 }
             }
@@ -382,7 +371,7 @@ impl NetplaySession {
         let recv_socket = socket.clone();
         let pong_reply_socket = socket.clone();
         tokio::spawn(async move {
-            let mut buf = [0u8; 64]; // Big enough for any packet type
+            let mut buf = [0u8; 64];
             loop {
                 match recv_socket.recv_from(&mut buf).await {
                     Ok((n, from_addr)) => {
@@ -401,13 +390,11 @@ impl NetplaySession {
                         } else if n == PING_PACKET_SIZE {
                             let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                             if magic == PING_MAGIC {
-                                // Received PING — echo back as PONG with same timestamp
                                 let mut pong = [0u8; PING_PACKET_SIZE];
                                 pong[0..4].copy_from_slice(&PONG_MAGIC.to_le_bytes());
-                                pong[4..12].copy_from_slice(&buf[4..12]); // copy timestamp
+                                pong[4..12].copy_from_slice(&buf[4..12]);
                                 let _ = pong_reply_socket.send_to(&pong, from_addr).await;
                             } else if magic == PONG_MAGIC {
-                                // Received PONG — extract timestamp and forward to pong_rx
                                 let ts = u64::from_le_bytes([
                                     buf[4], buf[5], buf[6], buf[7],
                                     buf[8], buf[9], buf[10], buf[11],
@@ -415,7 +402,6 @@ impl NetplaySession {
                                 let _ = pong_tx.send(ts).await;
                             }
                         }
-                        // Ignore other packet sizes (STUN responses, punch packets, etc.)
                     }
                     Err(_) => break,
                 }
@@ -429,6 +415,23 @@ impl NetplaySession {
     /// Set the peer's address to send inputs to.
     pub fn set_peer(&mut self, addr: SocketAddr) {
         self.peer_addr = Some(addr);
+        // Update the shared peer address so send tasks can see it.
+        // Use try_write first (non-blocking), fall back to spawning if contended.
+        let shared = self.shared_peer_addr.clone();
+        match shared.try_write() {
+            Ok(mut guard) => {
+                *guard = Some(addr);
+            }
+            Err(_) => {
+                // Lock is contended — spawn a task to update it
+                let shared2 = shared.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        *shared2.write().await = Some(addr);
+                    });
+                }
+            }
+        }
         self.state = SessionState::Connected;
     }
 
@@ -441,7 +444,7 @@ impl NetplaySession {
             frame,
             player_id: self.local_player_id,
             input,
-            checksum: 0, // TODO: compute game state hash
+            checksum: 0,
         };
 
         if let Some(ref tx) = self.send_tx {
@@ -495,10 +498,8 @@ impl NetplaySession {
     pub fn process_sync_packets(&mut self, local_hashes: &HashMap<u32, u32>) -> Option<(u32, u32, u32)> {
         if let Some(ref mut rx) = self.sync_rx {
             while let Ok(sync) = rx.try_recv() {
-                // Compare remote hash with our local hash for the same frame
                 if let Some(&local_hash) = local_hashes.get(&sync.frame) {
                     if local_hash != sync.state_hash {
-                        // Desync detected!
                         self.desync_info = Some((sync.frame, local_hash, sync.state_hash));
                         return Some((sync.frame, local_hash, sync.state_hash));
                     }
@@ -527,7 +528,6 @@ impl NetplaySession {
     }
 
     /// Process received pong packets and update rolling ping average.
-    /// Returns current ping in ms.
     pub fn process_pongs(&mut self) -> f64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now_us = SystemTime::now()
@@ -539,7 +539,6 @@ impl NetplaySession {
             while let Ok(sent_ts) = rx.try_recv() {
                 let rtt_us = now_us.saturating_sub(sent_ts);
                 let rtt_ms = rtt_us as f64 / 1000.0;
-                // Exponential moving average (α = 0.2)
                 if self.ping_ms == 0.0 {
                     self.ping_ms = rtt_ms;
                 } else {
@@ -580,7 +579,6 @@ pub fn netplay_start(
 ) -> Result<u16, String> {
     let mut ns = state.lock().map_err(|e| e.to_string())?;
 
-    // Create tokio runtime if not exists
     if ns.runtime.is_none() {
         ns.runtime = Some(
             tokio::runtime::Builder::new_multi_thread()
@@ -660,6 +658,5 @@ pub fn netplay_stop(
 ) -> Result<(), String> {
     let mut ns = state.lock().map_err(|e| e.to_string())?;
     ns.session = None;
-    // Don't drop the runtime — reuse it
     Ok(())
 }

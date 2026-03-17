@@ -56,6 +56,7 @@ export interface LobbyRoom {
   created: number | object;
   guest?: string;
   guestName?: string;
+  guestReady?: boolean;
 }
 
 // ── Room Code Generation ──
@@ -144,6 +145,11 @@ export async function joinRoom(
   return null; // Room not found or full
 }
 
+export function setGuestReady(roomId: string, ready: boolean) {
+  if (!db) return;
+  set(ref(db, `rooms/${roomId}/guestReady`), ready);
+}
+
 export function leaveRoom(roomId: string, playerId: string, isHost: boolean) {
   if (!db) return;
   if (isHost) {
@@ -153,6 +159,7 @@ export function leaveRoom(roomId: string, playerId: string, isHost: boolean) {
     // Guest leaving opens the room back up
     set(ref(db, `rooms/${roomId}/guest`), null);
     set(ref(db, `rooms/${roomId}/guestName`), null);
+    set(ref(db, `rooms/${roomId}/guestReady`), null);
     set(ref(db, `rooms/${roomId}/status`), "waiting");
   }
   set(ref(db, `players/${playerId}/status`), "idle");
@@ -196,7 +203,8 @@ export async function sendSignal(roomId: string, fromId: string, signal: any) {
 export function onSignals(
   roomId: string,
   myId: string,
-  callback: (signal: any, fromId: string) => void
+  callback: (signal: any, fromId: string) => void,
+  filterType?: string, // Only process signals of this type (others left in Firebase)
 ) {
   if (!db) return () => {};
   return onValue(ref(db, `signals/${roomId}`), (snapshot) => {
@@ -204,6 +212,8 @@ export function onSignals(
     if (!signals) return;
     for (const [key, data] of Object.entries(signals) as [string, any][]) {
       if (data.from !== myId) {
+        // If filterType is set, only process matching signals
+        if (filterType && data.signal?.type !== filterType) continue;
         callback(data.signal, data.from);
         // Clean up processed signal
         remove(ref(db, `signals/${roomId}/${key}`));

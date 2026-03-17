@@ -4,6 +4,7 @@
 //! This runs as a background task that polls Dolphin's memory and the netplay session.
 
 use crate::dolphin_mem::{DolphinMemState, MatchOutcome};
+use crate::hw_ipc::HWClient;
 use crate::netplay::{FrameInput, NetplaySession, NetplayState, SyncPacket};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,11 +106,11 @@ pub struct RollbackEngine {
     /// Latest frame confirmed by remote.
     pub confirmed_frame: u32,
     /// Total predictions made.
-    predictions_total: u64,
+    pub predictions_total: u64,
     /// Predictions that were correct.
-    predictions_correct: u64,
+    pub predictions_correct: u64,
     /// Timing for stats.
-    total_rollback_time: Duration,
+    pub total_rollback_time: Duration,
 }
 
 impl RollbackEngine {
@@ -820,6 +821,7 @@ pub fn rollback_start(
     state: tauri::State<'_, Arc<Mutex<RollbackState>>>,
     dolphin_state: tauri::State<'_, Arc<Mutex<DolphinMemState>>>,
     netplay_state: tauri::State<'_, Arc<Mutex<NetplayState>>>,
+    dolphin_proc_state: tauri::State<'_, Arc<Mutex<crate::DolphinState>>>,
 ) -> Result<String, String> {
     let mut rs = state.lock().map_err(|e| e.to_string())?;
     rs.engine.config.input_delay = input_delay;
@@ -831,24 +833,58 @@ pub fn rollback_start(
     rs.set_over = false;
     rs.ranked = ranked;
 
-    // Spawn background game loop
-    #[cfg(windows)]
-    {
+    // Check if we have an IPC client (using HowlingWind Dolphin fork)
+    let ipc_client = {
+        let ds = dolphin_proc_state.lock().map_err(|e| e.to_string())?;
+        ds.ipc_client.clone()
+    };
+
+    if let Some(ipc) = ipc_client {
+        // ── IPC PATH: Use our Dolphin fork with true rollback ──
+        eprintln!("[rollback] Using IPC-based rollback (HowlingWind Dolphin fork)");
         let rb_clone = Arc::clone(&*state);
-        let ds_clone = Arc::clone(&*dolphin_state);
         let np_clone = Arc::clone(&*netplay_state);
 
         let handle = std::thread::Builder::new()
-            .name("rollback-loop".to_string())
+            .name("rollback-ipc-loop".to_string())
             .spawn(move || {
-                run_game_loop(rb_clone, ds_clone, np_clone, local_player);
+                // Create a tokio runtime for the async IPC game loop
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime for IPC loop");
+                rt.block_on(crate::rollback_ipc::run_ipc_game_loop(
+                    ipc, rb_clone, np_clone, local_player,
+                ));
             })
-            .map_err(|e| format!("Failed to spawn rollback thread: {}", e))?;
+            .map_err(|e| format!("Failed to spawn IPC rollback thread: {}", e))?;
 
         rs.loop_handle = Some(handle);
-    }
+        Ok(format!("Rollback engine started [IPC/FORK] (player {}, delay {}, max rb {})",
+            local_player, input_delay, max_rollback))
+    } else {
+        // ── LEGACY PATH: External memory polling ──
+        eprintln!("[rollback] Using legacy external memory rollback (stock Dolphin)");
 
-    Ok(format!("Rollback engine started (player {}, delay {}, max rb {})", local_player, input_delay, max_rollback))
+        #[cfg(windows)]
+        {
+            let rb_clone = Arc::clone(&*state);
+            let ds_clone = Arc::clone(&*dolphin_state);
+            let np_clone = Arc::clone(&*netplay_state);
+
+            let handle = std::thread::Builder::new()
+                .name("rollback-loop".to_string())
+                .spawn(move || {
+                    run_game_loop(rb_clone, ds_clone, np_clone, local_player);
+                })
+                .map_err(|e| format!("Failed to spawn rollback thread: {}", e))?;
+
+            rs.loop_handle = Some(handle);
+        }
+
+        Ok(format!("Rollback engine started [LEGACY] (player {}, delay {}, max rb {})",
+            local_player, input_delay, max_rollback))
+    }
 }
 
 #[tauri::command]

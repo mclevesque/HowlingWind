@@ -10,6 +10,9 @@ mod dolphin_mem;
 mod rollback;
 mod stun;
 mod updater;
+mod hw_ipc;
+mod rollback_ipc;
+mod diagnostics;
 
 #[cfg(windows)]
 use std::ptr;
@@ -132,24 +135,37 @@ struct DolphinState {
     process: Option<Child>,
     #[cfg(windows)]
     embedded_hwnd: Option<SendHwnd>,
+    /// IPC client connected to our HowlingWind Dolphin fork (if using fork)
+    ipc_client: Option<Arc<hw_ipc::HWClient>>,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> PathBuf {
-    let config_dir = app.path().app_config_dir().unwrap();
+    let config_dir = app.path().app_config_dir()
+        .unwrap_or_else(|_| std::env::current_exe().unwrap_or_default().parent()
+            .unwrap_or(std::path::Path::new(".")).to_path_buf());
     fs::create_dir_all(&config_dir).ok();
     config_dir.join("settings.json")
 }
 
 fn auto_detect_paths() -> (String, String) {
-    // Look for bundled Dolphin relative to the executable first
+    // Look for HowlingWind Dolphin fork FIRST, then fall back to stock Dolphin.
     let mut dolphin_candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            // In dev: exe is in target/debug, Dolphin is in project root/dolphin/
-            // Walk up to find the project root
+            // Priority 1: Our fork next to the launcher (release layout)
+            dolphin_candidates.push(exe_dir.join("howlingwind-dolphin").join("Dolphin.exe"));
+
+            // Priority 2: Walk up directories (dev mode)
             let mut dir = exe_dir.to_path_buf();
             for _ in 0..5 {
+                // Check for fork build output
+                let fork_candidate = dir.join("howlingwind-dolphin").join("Binary").join("x64").join("Release").join("Dolphin.exe");
+                if fork_candidate.exists() {
+                    dolphin_candidates.push(fork_candidate);
+                    break;
+                }
+                // Also check stock Dolphin as fallback
                 let candidate = dir.join("dolphin").join("Dolphin-x64").join("Dolphin.exe");
                 if candidate.exists() {
                     dolphin_candidates.push(candidate);
@@ -157,7 +173,7 @@ fn auto_detect_paths() -> (String, String) {
                 }
                 if !dir.pop() { break; }
             }
-            // Also check next to the exe (for release/packaged builds)
+            // Fallback: stock Dolphin next to exe
             dolphin_candidates.push(exe_dir.join("dolphin").join("Dolphin-x64").join("Dolphin.exe"));
             dolphin_candidates.push(exe_dir.join("Dolphin-x64").join("Dolphin.exe"));
             dolphin_candidates.push(exe_dir.join("Dolphin.exe"));
@@ -178,16 +194,41 @@ fn auto_detect_paths() -> (String, String) {
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
+            // Search games/ folder for any .iso file (GNT4.iso, NGNT4.iso, etc.)
             let mut dir = exe_dir.to_path_buf();
             for _ in 0..5 {
-                let candidate = dir.join("games").join("GNT4.iso");
-                if candidate.exists() {
-                    iso_candidates.push(candidate);
-                    break;
+                let games_dir = dir.join("games");
+                if games_dir.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&games_dir) {
+                        for entry in entries.flatten() {
+                            let p = entry.path();
+                            if let Some(ext) = p.extension() {
+                                if ext.eq_ignore_ascii_case("iso") || ext.eq_ignore_ascii_case("gcm") {
+                                    iso_candidates.push(p);
+                                }
+                            }
+                        }
+                    }
+                    if !iso_candidates.is_empty() { break; }
                 }
                 if !dir.pop() { break; }
             }
-            iso_candidates.push(exe_dir.join("games").join("GNT4.iso"));
+            // Also check directly next to exe
+            let games_dir = exe_dir.join("games");
+            if games_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&games_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if let Some(ext) = p.extension() {
+                            if ext.eq_ignore_ascii_case("iso") || ext.eq_ignore_ascii_case("gcm") {
+                                if !iso_candidates.contains(&p) {
+                                    iso_candidates.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -207,10 +248,13 @@ fn load_settings(app: &tauri::AppHandle) -> AppSettings {
     if path.exists() {
         let data = fs::read_to_string(&path).unwrap_or_default();
         let mut settings: AppSettings = serde_json::from_str(&data).unwrap_or_default();
-        if settings.dolphin_path.is_empty() || settings.iso_path.is_empty() {
+        // Re-detect if paths are empty OR if saved paths no longer exist (stale settings)
+        let dolphin_missing = settings.dolphin_path.is_empty() || !PathBuf::from(&settings.dolphin_path).exists();
+        let iso_missing = settings.iso_path.is_empty() || !PathBuf::from(&settings.iso_path).exists();
+        if dolphin_missing || iso_missing {
             let (dolphin, iso) = auto_detect_paths();
-            if settings.dolphin_path.is_empty() { settings.dolphin_path = dolphin; }
-            if settings.iso_path.is_empty() { settings.iso_path = iso; }
+            if dolphin_missing { settings.dolphin_path = dolphin; }
+            if iso_missing { settings.iso_path = iso; }
         }
         settings
     } else {
@@ -1289,10 +1333,6 @@ fn spawn_dolphin_hidden(dolphin_path: &str, iso_path: &str, mode: &str) -> Resul
         .arg("--exec")
         .arg(iso_path);
 
-    if mode == "netplay" {
-        cmd.arg("--netplay");
-    }
-
     // DETACHED_PROCESS = 0x00000008 - detach from parent console
     // without restricting USB/device access (CREATE_NO_WINDOW breaks GC adapter)
     cmd.creation_flags(0x00000008);
@@ -1301,13 +1341,10 @@ fn spawn_dolphin_hidden(dolphin_path: &str, iso_path: &str, mode: &str) -> Resul
 }
 
 #[cfg(not(windows))]
-fn spawn_dolphin_hidden(dolphin_path: &str, iso_path: &str, mode: &str) -> Result<Child, String> {
+fn spawn_dolphin_hidden(dolphin_path: &str, iso_path: &str, _mode: &str) -> Result<Child, String> {
     use std::process::Command;
     let mut cmd = Command::new(dolphin_path);
     cmd.arg("--batch").arg("--exec").arg(iso_path);
-    if mode == "netplay" {
-        cmd.arg("--netplay");
-    }
     cmd.spawn().map_err(|e| format!("Failed to launch Dolphin: {}", e))
 }
 
@@ -1368,6 +1405,35 @@ fn launch_dolphin(
         ds.process = Some(child);
     }
 
+    // Connect to our HowlingWind Dolphin fork's IPC server (background)
+    {
+        let state_ipc = Arc::clone(state.inner());
+        let app_ipc = app.clone();
+        tokio::spawn(async move {
+            // Wait a moment for the IPC server to start inside Dolphin
+            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+            match hw_ipc::HWClient::connect(10000).await {
+                Ok(client) => {
+                    crate::diagnostics::log_ipc("Connected to HowlingWind Dolphin fork");
+                    let client = Arc::new(client);
+                    if let Ok(mut ds) = state_ipc.lock() {
+                        ds.ipc_client = Some(client);
+                    }
+                    // Notify frontend that IPC is ready
+                    use tauri::Emitter;
+                    if let Some(window) = app_ipc.get_webview_window("main") {
+                        let _ = window.emit("ipc-connected", true);
+                    }
+                }
+                Err(e) => {
+                    crate::diagnostics::log_warn(&format!("IPC connect failed (stock Dolphin?): {}", e));
+                    // Not fatal — we fall back to external memory approach
+                }
+            }
+        });
+    }
+
     #[cfg(windows)]
     {
         let state_inner = Arc::clone(state.inner());
@@ -1378,9 +1444,9 @@ fn launch_dolphin(
             // hide the window the instant it appears (100ms poll interval)
             if let Some(dolphin_hwnd) = find_and_hide_dolphin_window(150) {
                 if let Some(window) = app_clone.get_webview_window("main") {
-                    let parent_hwnd: HWND = {
-                        let raw = window.hwnd().unwrap();
-                        raw.0 as HWND
+                    let parent_hwnd: HWND = match window.hwnd() {
+                        Ok(raw) => raw.0 as HWND,
+                        Err(_) => return, // Window closed before we could embed
                     };
 
                     let size = window.inner_size().unwrap_or_default();
@@ -1452,6 +1518,18 @@ fn resize_embedded(
     Ok(())
 }
 
+#[tauri::command]
+fn ipc_status(state: tauri::State<'_, Arc<Mutex<DolphinState>>>) -> Result<serde_json::Value, String> {
+    let ds = state.lock().map_err(|e| e.to_string())?;
+    let connected = ds.ipc_client.as_ref().map(|c| c.is_connected()).unwrap_or(false);
+    let frame = ds.ipc_client.as_ref().map(|c| c.current_frame()).unwrap_or(0);
+    Ok(serde_json::json!({
+        "connected": connected,
+        "frame": frame,
+        "using_fork": ds.ipc_client.is_some(),
+    }))
+}
+
 /// Kill Dolphin process if it's still running.
 fn kill_dolphin_process(state: &Arc<Mutex<DolphinState>>) {
     if let Ok(mut ds) = state.lock() {
@@ -1467,6 +1545,11 @@ fn kill_dolphin_process(state: &Arc<Mutex<DolphinState>>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize diagnostics logging and panic hook
+    diagnostics::init();
+    diagnostics::install_panic_hook();
+    diagnostics::log_info("HowlingWind launcher starting");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1474,6 +1557,7 @@ pub fn run() {
             process: None,
             #[cfg(windows)]
             embedded_hwnd: None,
+            ipc_client: None,
         })))
         .manage(Arc::new(Mutex::new(netplay::NetplayState::new())))
         .manage(Arc::new(Mutex::new(dolphin_mem::DolphinMemState::new())))
@@ -1525,8 +1609,12 @@ pub fn run() {
             stun::stun_hole_punch,
             updater::check_for_updates,
             updater::download_update,
+            updater::apply_update_and_restart,
             updater::get_app_version,
             get_local_ip,
+            ipc_status,
+            diagnostics::get_debug_log_path,
+            diagnostics::read_debug_log,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

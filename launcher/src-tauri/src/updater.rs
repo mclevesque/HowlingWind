@@ -172,37 +172,64 @@ pub async fn download_update(app: tauri::AppHandle, url: String) -> Result<Strin
 
     drop(file); // Close the file before extracting
 
-    // Extract zip
+    // Extract zip to a TEMP staging folder (not over the running app!)
     emit("extracting", "Extracting update...", downloaded, total, 100.0);
 
     let zip_path_clone = zip_path.clone();
     let app_dir_clone = app_dir.clone();
+    let staging_dir = app_dir.join("_update_staging");
+    let staging_clone = staging_dir.clone();
+
     tokio::task::spawn_blocking(move || {
+        // Clean previous staging if exists
+        if staging_clone.exists() {
+            std::fs::remove_dir_all(&staging_clone).ok();
+        }
+        std::fs::create_dir_all(&staging_clone)
+            .map_err(|e| format!("Failed to create staging dir: {}", e))?;
+
         let file = std::fs::File::open(&zip_path_clone)
             .map_err(|e| format!("Failed to open zip: {}", e))?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| format!("Invalid zip file: {}", e))?;
 
+        // Detect top-level folder in zip (e.g. "HowlingWind/" or "HowlingWind\")
+        let top_prefix = {
+            let mut prefix = String::new();
+            if let Ok(first) = archive.by_index(0) {
+                // Normalize backslashes to forward slashes
+                let name = first.name().replace('\\', "/");
+                if let Some(slash) = name.find('/') {
+                    prefix = name[..=slash].to_string();
+                }
+            }
+            prefix
+        };
+
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)
                 .map_err(|e| format!("Zip entry error: {}", e))?;
 
-            let out_path = match entry.enclosed_name() {
-                Some(path) => app_dir_clone.join(path),
-                None => continue,
+            // Normalize backslashes to forward slashes
+            let entry_name = entry.name().replace('\\', "/");
+            // Strip the top-level folder prefix (e.g. "HowlingWind/file" -> "file")
+            let relative = if !top_prefix.is_empty() && entry_name.starts_with(&top_prefix) {
+                entry_name[top_prefix.len()..].to_string()
+            } else {
+                entry_name.clone()
             };
+
+            if relative.is_empty() {
+                continue; // Skip the top-level folder entry itself
+            }
+
+            let out_path = staging_clone.join(relative);
 
             if entry.is_dir() {
                 std::fs::create_dir_all(&out_path).ok();
             } else {
                 if let Some(parent) = out_path.parent() {
                     std::fs::create_dir_all(parent).ok();
-                }
-                // Skip overwriting our own exe (Windows locks it)
-                if out_path.ends_with("HowlingWind.exe") {
-                    let bak = out_path.with_extension("exe.bak");
-                    // Try to rename current exe to .bak so we can write the new one
-                    std::fs::rename(&out_path, &bak).ok();
                 }
                 let mut outfile = std::fs::File::create(&out_path)
                     .map_err(|e| format!("Failed to extract {}: {}", out_path.display(), e))?;
@@ -222,9 +249,75 @@ pub async fn download_update(app: tauri::AppHandle, url: String) -> Result<Strin
     // Clean up zip
     std::fs::remove_file(&zip_path).ok();
 
-    emit("done", "Update complete! Restart HowlingWind to use the new version.", downloaded, total, 100.0);
+    // Write a batch script that waits for us to exit, copies files, and relaunches
+    let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_name = exe_path.file_name().unwrap().to_string_lossy().to_string();
+    let batch_path = app_dir.join("_apply_update.bat");
+    let batch_contents = format!(
+        r#"@echo off
+title HowlingWind Updater
+echo Applying update...
+:: Wait for the app to close
+:wait
+tasklist /FI "PID eq %1" 2>NUL | find /I "%1" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto wait
+)
+:: Copy staging files over app directory (skip games folder to preserve user ISOs)
+for %%F in ("{staging}\*") do (
+    if not "%%~nxF"=="games" (
+        copy /Y "%%F" "{app_dir}\" >NUL 2>&1
+    )
+)
+:: Copy subdirectories except games
+for /D %%D in ("{staging}\*") do (
+    if /I not "%%~nxD"=="games" (
+        xcopy /E /Y /Q "%%D" "{app_dir}\%%~nxD\" >NUL 2>&1
+    )
+)
+:: Ensure games directory exists but don't overwrite ISOs
+if not exist "{app_dir}\games" mkdir "{app_dir}\games"
+:: Clean up
+rmdir /S /Q "{staging}" >NUL 2>&1
+:: Relaunch
+start "" "{exe}"
+:: Delete this batch file
+del "%~f0"
+"#,
+        staging = staging_dir.display(),
+        app_dir = app_dir.display(),
+        exe = exe_path.display(),
+    );
+    std::fs::write(&batch_path, &batch_contents)
+        .map_err(|e| format!("Failed to write update script: {}", e))?;
 
-    Ok("Update extracted successfully. Please restart HowlingWind.".to_string())
+    emit("done", "Update ready! Click restart to apply.", downloaded, total, 100.0);
+
+    Ok("ready".to_string())
+}
+
+/// Launch the update batch script and exit so it can replace our files.
+#[tauri::command]
+pub fn apply_update_and_restart(app: tauri::AppHandle) -> Result<(), String> {
+    let app_dir = get_app_dir();
+    let batch_path = app_dir.join("_apply_update.bat");
+    if !batch_path.exists() {
+        return Err("No update staged. Download an update first.".to_string());
+    }
+
+    let pid = std::process::id();
+
+    // Launch the batch script with our PID so it can wait for us to exit
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "/min", "", &batch_path.to_string_lossy(), &pid.to_string()])
+        .spawn()
+        .map_err(|e| format!("Failed to launch updater: {}", e))?;
+
+    // Exit the app so the batch script can overwrite our files
+    app.exit(0);
+
+    Ok(())
 }
 
 /// Get the current app version.

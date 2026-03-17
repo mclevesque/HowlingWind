@@ -75,9 +75,14 @@
     }
   }
 
-  function restartApp() {
-    // Close and let user reopen — exe was replaced in-place
-    window.close();
+  async function restartApp() {
+    try {
+      await invoke("apply_update_and_restart");
+    } catch (e: any) {
+      // Fallback: just close and let user reopen
+      updateMessage = `Restart failed: ${e}. Please close and reopen HowlingWind manually.`;
+      updatePhase = "error";
+    }
   }
 
 
