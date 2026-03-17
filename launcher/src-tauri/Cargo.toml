@@ -1,6 +1,6 @@
 [package]
 name = "howlingwind-launcher"
-version = "0.1.1"
+version = "0.1.6"
 description = "HowlingWind - Rollback Netplay for Naruto GNT4"
 authors = ["HowlingWind"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["custom-protocol"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }

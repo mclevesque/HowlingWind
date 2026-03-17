@@ -317,18 +317,21 @@ fn check_match_over(mem: &crate::dolphin_mem::DolphinMemory) -> Option<MatchOutc
     let p2 = mem.read_player_state(1).ok()?;
     let frame = mem.read_frame_counter().unwrap_or(0);
 
-    // Only trigger if at least one player is at 0 health AND the match has started
-    if frame < 60 {
+    // GNT4 health is a DAMAGE ACCUMULATOR: 0 = full HP, increases as damage taken
+    // KO threshold is ~150+ damage
+    const KO_THRESHOLD: u16 = 150;
+
+    if frame < 120 {
         return None; // Don't trigger during intro/loading
     }
 
-    if p1.health == 0 || p2.health == 0 {
-        let result = if p1.health == 0 && p2.health == 0 {
+    if p1.health >= KO_THRESHOLD || p2.health >= KO_THRESHOLD {
+        let result = if p1.health >= KO_THRESHOLD && p2.health >= KO_THRESHOLD {
             "draw"
-        } else if p1.health == 0 {
-            "p2_win"
+        } else if p1.health >= KO_THRESHOLD {
+            "p2_win" // P1 took too much damage
         } else {
-            "p1_win"
+            "p1_win" // P2 took too much damage
         };
 
         Some(MatchOutcome {
@@ -406,8 +409,9 @@ pub fn run_game_loop(
         }
 
         // Detect frame advancement by watching P1's animation frame counter (+0x25A).
-        // This changes every game frame regardless of what the global counter does.
-        let anim_frame = {
+        // This is proven to work in Practice mode. We use a u16 that wraps, so we
+        // detect any change (not just increments).
+        let frame_indicator = {
             let ds = dolphin_state.lock().unwrap();
             match &ds.memory {
                 Some(mem) => {
@@ -415,30 +419,40 @@ pub fn run_game_loop(
                     if p1_ptr >= 0x80000000 && p1_ptr < 0x81800000 {
                         mem.read_u16(p1_ptr + 0x25A).unwrap_or(last_anim_frame)
                     } else {
-                        last_anim_frame // No player — don't advance
+                        last_anim_frame // No player struct — don't advance
                     }
                 }
                 None => { std::thread::sleep(Duration::from_millis(100)); continue; }
             }
         };
 
-        // Only act when the animation frame changes (= new game frame)
-        if anim_frame == last_anim_frame {
+        // Only act when the frame counter changes (= new game frame)
+        if frame_indicator == last_anim_frame {
             std::thread::sleep(Duration::from_micros(500));
             loop_count += 1;
             continue;
         }
 
-        last_anim_frame = anim_frame;
+        last_anim_frame = frame_indicator;
         current_frame += 1;
+
+        // Debug: log periodically so we can verify the loop is running
+        if current_frame <= 3 || current_frame % 120 == 0 {
+            let np = netplay_state.lock().unwrap();
+            let remote_count = np.session.as_ref().map(|s| s.input_buffer.remote.len()).unwrap_or(0);
+            let has_peer = np.session.as_ref().map(|s| s.peer_addr.is_some()).unwrap_or(false);
+            eprintln!("[rollback] F{} P{} peer={} remote_inputs={}", current_frame, local_player+1, has_peer, remote_count);
+        }
 
         // ── Frame detected! Do rollback work ──
 
-        // Step 1: Read local player's input
+        // Step 1: Read local player's input from port 0 (physical controller)
+        // The physical controller is ALWAYS port 0 in Dolphin, regardless of
+        // whether this player is P1 or P2 in the game.
         let local_input = {
             let ds = dolphin_state.lock().unwrap();
             match &ds.memory {
-                Some(mem) => mem.read_player_input(local_player).unwrap_or_default(),
+                Some(mem) => mem.read_pad_input(0).unwrap_or_default(),
                 None => GCPadStatus::default(),
             }
         };
@@ -515,7 +529,7 @@ pub fn run_game_loop(
                                         trigger_l: remote_input.trigger_l,
                                         trigger_r: remote_input.trigger_r,
                                     };
-                                    let _ = mem.write_player_input(remote_player, &pad);
+                                    let _ = mem.write_pad_buffer(remote_player, &pad);
                                 }
                             }
                         }
@@ -555,7 +569,14 @@ pub fn run_game_loop(
 
                 let ds = dolphin_state.lock().unwrap();
                 if let Some(mem) = &ds.memory {
-                    let _ = mem.write_player_input(remote_player, &pad);
+                    // Write remote player's input to their assigned port
+                    let _ = mem.write_pad_buffer(remote_player, &pad);
+
+                    // If we're P2 (guest), our physical controller is port 0 but the game
+                    // expects our input on port 1. Redirect local input to our assigned port.
+                    if local_player == 1 {
+                        let _ = mem.write_pad_buffer(1, &local_input);
+                    }
                 }
 
                 // Track prediction stats

@@ -1,5 +1,5 @@
 {
-  "version": "0.1.5",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.5/HowlingWind-v0.1.5.zip",
-  "notes": "Critical netplay fixes: UDP, input injection, signal sync, KO detection"
+  "version": "0.1.6",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.6/HowlingWind-v0.1.6.zip",
+  "notes": "Fix input sync: read from physical controller port, redirect P2 input correctly"
 }

@@ -746,6 +746,30 @@ impl DolphinMemory {
         Ok(())
     }
 
+    /// Read controller input directly from the PAD polling buffer.
+    /// Port 0 is always the physical controller, regardless of player assignment.
+    pub fn read_pad_input(&self, port: u8) -> Result<GCPadStatus, String> {
+        use gnt4_input_addrs::*;
+        if port > 3 {
+            return Err("Invalid controller port (0-3)".to_string());
+        }
+
+        let addr = PAD_BUFFER_BASE + (port as u32 * PAD_STATUS_SIZE);
+        let offset = (addr & 0x01FFFFFF) as usize;
+        let mut buf = [0u8; 8];
+        self.read(offset, &mut buf)?;
+
+        Ok(GCPadStatus {
+            buttons: u16::from_be_bytes([buf[0], buf[1]]),
+            stick_x: buf[2] as i8,
+            stick_y: buf[3] as i8,
+            cstick_x: buf[4] as i8,
+            cstick_y: buf[5] as i8,
+            trigger_l: buf[6],
+            trigger_r: buf[7],
+        })
+    }
+
     /// Alternative injection: write directly to the PAD polling buffer.
     /// More universal — works regardless of game-specific struct layout.
     pub fn write_pad_buffer(&self, port: u8, input: &GCPadStatus) -> Result<(), String> {
