@@ -156,20 +156,23 @@ fn auto_detect_paths() -> (String, String) {
             // Priority 1: Our fork next to the launcher (release layout)
             dolphin_candidates.push(exe_dir.join("howlingwind-dolphin").join("Dolphin.exe"));
 
-            // Priority 2: Walk up directories (dev mode)
+            // Priority 2: Walk up directories (dev mode + project layout)
             let mut dir = exe_dir.to_path_buf();
             for _ in 0..5 {
-                // Check for fork build output
-                let fork_candidate = dir.join("howlingwind-dolphin").join("Binary").join("x64").join("Release").join("Dolphin.exe");
-                if fork_candidate.exists() {
-                    dolphin_candidates.push(fork_candidate);
-                    break;
+                // Check for fork (flat release layout)
+                let fork_flat = dir.join("howlingwind-dolphin").join("Dolphin.exe");
+                if fork_flat.exists() && !dolphin_candidates.contains(&fork_flat) {
+                    dolphin_candidates.push(fork_flat);
                 }
-                // Also check stock Dolphin as fallback
-                let candidate = dir.join("dolphin").join("Dolphin-x64").join("Dolphin.exe");
-                if candidate.exists() {
-                    dolphin_candidates.push(candidate);
-                    break;
+                // Check for fork (build output layout)
+                let fork_build = dir.join("howlingwind-dolphin").join("Binary").join("x64").join("Release").join("Dolphin.exe");
+                if fork_build.exists() {
+                    dolphin_candidates.push(fork_build);
+                }
+                // Stock Dolphin as fallback (LOWER priority than fork)
+                let stock = dir.join("dolphin").join("Dolphin-x64").join("Dolphin.exe");
+                if stock.exists() {
+                    dolphin_candidates.push(stock);
                 }
                 if !dir.pop() { break; }
             }
@@ -188,6 +191,9 @@ fn auto_detect_paths() -> (String, String) {
         .find(|p| p.exists())
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
+
+    eprintln!("[auto_detect] Dolphin candidates: {:?}", dolphin_candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+    eprintln!("[auto_detect] Selected: {}", if dolphin.is_empty() { "NONE" } else { &dolphin });
 
     // Look for the ISO similarly
     let mut iso_candidates: Vec<PathBuf> = Vec::new();
@@ -1465,7 +1471,12 @@ fn launch_dolphin(
     {
         let state_ipc = Arc::clone(state.inner());
         let app_ipc = app.clone();
-        tokio::spawn(async move {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for IPC connect");
+            rt.block_on(async move {
             // Wait a moment for the IPC server to start inside Dolphin
             tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
@@ -1487,7 +1498,8 @@ fn launch_dolphin(
                     // Not fatal — we fall back to external memory approach
                 }
             }
-        });
+            }); // end block_on
+        }); // end thread::spawn
     }
 
     #[cfg(windows)]

@@ -1,5 +1,5 @@
 {
-  "version": "0.2.5",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.5/HowlingWind-v0.2.5.zip",
-  "notes": "v0.2.5 - Fix updater: preserve ISOs, replace folders properly"
+  "version": "0.2.6",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.6/HowlingWind-v0.2.6.zip",
+  "notes": "v0.2.6 - Fix IPC crash + use HowlingWind Dolphin fork"
 }
