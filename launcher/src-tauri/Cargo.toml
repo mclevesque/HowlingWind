@@ -1,6 +1,6 @@
 [package]
 name = "howlingwind-launcher"
-version = "0.2.9"
+version = "0.3.0"
 description = "HowlingWind - Rollback Netplay for Naruto GNT4"
 authors = ["HowlingWind"]
 edition = "2021"

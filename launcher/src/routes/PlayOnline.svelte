@@ -470,34 +470,37 @@
 
   /** Launch Dolphin with GNT4 if it's not already running, then wait for it to be ready. */
   async function ensureDolphinRunning(): Promise<boolean> {
-    // Always launch Dolphin fresh — kill any stale process first
+    // Always launch Dolphin fresh
     netplayStatus = "Launching Dolphin...";
     try {
       await invoke("launch_dolphin", { mode: "netplay", isoOverride: null });
-      netplayStatus = "Dolphin launched! Waiting for game to load...";
+      netplayStatus = "Dolphin launched!";
     } catch (e: any) {
       netplayStatus = `Failed to launch Dolphin: ${e}`;
       error = `Dolphin launch error: ${e}`;
-      console.error("[PlayOnline] launch_dolphin failed:", e);
       return false;
     }
 
-    // Wait for Dolphin to load the game (poll for memory attachment)
-    netplayStatus = "Waiting for game to load...";
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      netplayStatus = `Waiting for game to load... (${attempt + 1}/30)`;
+    // Give Dolphin a moment to start, then try memory attach.
+    // The IPC game loop handles its own memory attachment, so don't block on this.
+    netplayStatus = "Waiting for Dolphin to initialize...";
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // Try to attach to memory (best effort — rollback loop will retry if needed)
+    for (let attempt = 0; attempt < 10; attempt++) {
       try {
         await invoke("dolphin_mem_attach");
         netplayStatus = "Dolphin ready!";
         return true;
       } catch {
-        // Not ready yet
+        await new Promise((r) => setTimeout(r, 1000));
+        netplayStatus = `Waiting for game to load... (${attempt + 1}/10)`;
       }
     }
-    netplayStatus = "Timed out waiting for Dolphin. Launch it manually and load GNT4.";
-    error = "Dolphin timed out. Check Settings to make sure Dolphin and ISO paths are correct.";
-    return false;
+
+    // Even if mem attach failed, return true — the IPC path handles its own attachment
+    netplayStatus = "Dolphin running (memory attach will retry in background)";
+    return true;
   }
 
   async function startMatch() {
@@ -582,17 +585,7 @@
           netplayStatus = "Connected! Starting rollback...";
           playSfx("match_found");
 
-          // Ensure Dolphin is attached (may have launched during connection)
-          if (!dolphinReady) {
-            const nowReady = await ensureDolphinRunning();
-            if (!nowReady) {
-              netplayStatus = "Connected but Dolphin not ready. Launch Dolphin with GNT4 and try again.";
-              unsubSignal();
-              return;
-            }
-          }
-
-          netplayStatus = "Attached to Dolphin. Starting rollback engine...";
+          netplayStatus = "Connected! Starting rollback engine...";
 
           // Start rollback engine
           try {

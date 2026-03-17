@@ -1,5 +1,5 @@
 {
-  "version": "0.2.9",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.9/HowlingWind-v0.2.9.zip",
-  "notes": "v0.2.9 - Diagnostic build with full rollback tracing"
+  "version": "0.3.0",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.0/HowlingWind-v0.3.0.zip",
+  "notes": "v0.3.0 - Fix rollback not starting (memory attach no longer blocks)"
 }
