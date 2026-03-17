@@ -684,8 +684,21 @@ export async function getLeaderboard(
   if (!snap.exists()) return [];
 
   const ratings = snap.val();
-  return Object.entries(ratings)
-    .map(([id, rating]: [string, any]) => ({ id, ...rating }))
+  const all = Object.entries(ratings)
+    .map(([id, rating]: [string, any]) => ({ id, ...rating }));
+
+  // Deduplicate by player name — keep the entry with the most games played
+  // (same person may have multiple IDs from reinstalls)
+  const byName = new Map<string, typeof all[0]>();
+  for (const entry of all) {
+    const name = (entry.name || "").toLowerCase();
+    const existing = byName.get(name);
+    if (!existing || (entry.wins + entry.losses) > (existing.wins + existing.losses)) {
+      byName.set(name, entry);
+    }
+  }
+
+  return Array.from(byName.values())
     .sort((a, b) => b.elo - a.elo);
 }
 
@@ -716,10 +729,20 @@ export function onLeaderboardChanged(
   if (!db) return () => {};
   return onValue(ref(db, `ratings/${game}`), (snapshot) => {
     const ratings = snapshot.val() || {};
-    const leaderboard = Object.entries(ratings)
-      .map(([id, rating]: [string, any]) => ({ id, ...rating }))
-      .sort((a, b) => b.elo - a.elo);
-    callback(leaderboard);
+    const all = Object.entries(ratings)
+      .map(([id, rating]: [string, any]) => ({ id, ...rating }));
+
+    // Deduplicate by name — keep entry with most games
+    const byName = new Map<string, typeof all[0]>();
+    for (const entry of all) {
+      const name = (entry.name || "").toLowerCase();
+      const existing = byName.get(name);
+      if (!existing || (entry.wins + entry.losses) > (existing.wins + existing.losses)) {
+        byName.set(name, entry);
+      }
+    }
+
+    callback(Array.from(byName.values()).sort((a, b) => b.elo - a.elo));
   });
 }
 
