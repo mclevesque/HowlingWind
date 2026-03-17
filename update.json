@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.0/HowlingWind-v0.1.0.zip",
-  "notes": "Initial release - lobby system, rollback netcode, auto-updater"
+  "version": "0.1.1",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.1/HowlingWind-v0.1.1.zip",
+  "notes": "LAN connection fix, better Dolphin launch, error handling"
 }
