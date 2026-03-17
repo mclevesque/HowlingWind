@@ -18,7 +18,7 @@ use std::path::PathBuf;
 /// Where to check for updates. Change this to your actual hosting URL.
 /// A GitHub raw file, gist, or any static JSON endpoint works.
 const UPDATE_CHECK_URL: &str =
-    "https://raw.githubusercontent.com/nicholasmoser/HowlingWind/main/update.json";
+    "https://raw.githubusercontent.com/HowlingWind/HowlingWind/main/update.json";
 
 /// Current app version (from Cargo.toml via tauri.conf.json).
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
