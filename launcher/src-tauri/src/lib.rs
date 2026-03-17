@@ -254,7 +254,18 @@ fn load_settings(app: &tauri::AppHandle) -> AppSettings {
     if path.exists() {
         let data = fs::read_to_string(&path).unwrap_or_default();
         let mut settings: AppSettings = serde_json::from_str(&data).unwrap_or_default();
-        // Re-detect if paths are empty OR if saved paths no longer exist (stale settings)
+
+        // ALWAYS re-detect Dolphin path to prefer our fork over stock
+        // The fork has an IPC server for proper rollback; stock Dolphin does not.
+        let (detected_dolphin, _) = auto_detect_paths();
+        if !detected_dolphin.is_empty() && detected_dolphin != settings.dolphin_path {
+            // Check if detected path is our fork (contains "howlingwind-dolphin")
+            if detected_dolphin.contains("howlingwind-dolphin") {
+                eprintln!("[settings] Overriding saved Dolphin path with fork: {}", detected_dolphin);
+                settings.dolphin_path = detected_dolphin;
+            }
+        }
+
         let dolphin_missing = settings.dolphin_path.is_empty() || !PathBuf::from(&settings.dolphin_path).exists();
         let iso_missing = settings.iso_path.is_empty() || !PathBuf::from(&settings.iso_path).exists();
         if dolphin_missing || iso_missing {
