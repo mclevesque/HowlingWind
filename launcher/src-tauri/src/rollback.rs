@@ -843,18 +843,18 @@ pub fn rollback_start(
         // ── IPC PATH: Use our Dolphin fork with true rollback ──
         eprintln!("[rollback] Using IPC-based rollback (HowlingWind Dolphin fork)");
         let rb_clone = Arc::clone(&*state);
+        let ds_clone = Arc::clone(&*dolphin_state);
         let np_clone = Arc::clone(&*netplay_state);
 
         let handle = std::thread::Builder::new()
             .name("rollback-ipc-loop".to_string())
             .spawn(move || {
-                // Create a tokio runtime for the async IPC game loop
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("Failed to create tokio runtime for IPC loop");
                 rt.block_on(crate::rollback_ipc::run_ipc_game_loop(
-                    ipc, rb_clone, np_clone, local_player,
+                    ipc, rb_clone, ds_clone, np_clone, local_player,
                 ));
             })
             .map_err(|e| format!("Failed to spawn IPC rollback thread: {}", e))?;

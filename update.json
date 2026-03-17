@@ -1,5 +1,5 @@
 {
-  "version": "0.2.6",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.6/HowlingWind-v0.2.6.zip",
-  "notes": "v0.2.6 - Fix IPC crash + use HowlingWind Dolphin fork"
+  "version": "0.2.7",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.7/HowlingWind-v0.2.7.zip",
+  "notes": "v0.2.7 - FIX INPUT SYNC: read local controller, send to remote, inject via IPC"
 }

@@ -1,61 +1,112 @@
-//! IPC-based rollback engine — uses our Dolphin fork's built-in IPC server.
+//! Hybrid rollback engine — reads input from Dolphin memory, injects via IPC.
 //!
-//! This replaces the external memory polling approach with direct control:
-//! - Frame boundary events from Dolphin (no polling needed)
-//! - SI-level input injection (SET_INPUT at exact polling moment)
-//! - Full emulator save states (SAVE_STATE/LOAD_STATE)
-//! - Frame stepping for rollback resimulation (FRAME_ADVANCE)
+//! This combines the best of both approaches:
+//! - LOCAL INPUT: Read from Dolphin's memory (read_pad_input, proven reliable)
+//! - REMOTE INPUT: Injected via IPC SET_INPUT at SI level (frame-perfect)
+//! - SAVE/LOAD: Via IPC (full emulator state, not just 2-4KB)
+//! - FRAME STEPPING: Via IPC FRAME_ADVANCE (true rollback resimulation)
 
+use crate::dolphin_mem::{DolphinMemState, GCPadStatus};
 use crate::hw_ipc::{HWClient, HWPadInput};
 use crate::netplay::{FrameInput, NetplayState};
-use crate::rollback::{EngineState, RollbackConfig, RollbackState, RollbackStats};
+use crate::rollback::{EngineState, RollbackConfig, RollbackState};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Save state slot management — we use a ring buffer of Dolphin's slots (0-15)
 const MAX_SLOTS: u32 = 16;
 
 fn slot_for_frame(frame: u32) -> u32 {
     frame % MAX_SLOTS
 }
 
-/// Run the IPC-based rollback game loop.
-/// This is the new hot path when using our HowlingWind Dolphin fork.
+/// Convert GCPadStatus (memory read) → FrameInput (network format).
+fn pad_to_frame_input(pad: &GCPadStatus) -> FrameInput {
+    FrameInput {
+        buttons: pad.buttons,
+        stick_x: pad.stick_x,
+        stick_y: pad.stick_y,
+        cstick_x: pad.cstick_x,
+        cstick_y: pad.cstick_y,
+        trigger_l: pad.trigger_l,
+        trigger_r: pad.trigger_r,
+    }
+}
+
+/// Convert FrameInput (network format) → HWPadInput (IPC format).
+fn frame_input_to_pad(input: &FrameInput) -> HWPadInput {
+    HWPadInput {
+        buttons: input.buttons,
+        stick_x: input.stick_x,
+        stick_y: input.stick_y,
+        cstick_x: input.cstick_x,
+        cstick_y: input.cstick_y,
+        trigger_l: input.trigger_l,
+        trigger_r: input.trigger_r,
+    }
+}
+
+/// Run the hybrid rollback game loop.
 ///
-/// Key differences from the external memory approach:
-/// 1. No polling — we wait for FRAME_BOUNDARY events from Dolphin
-/// 2. Input injection via SET_INPUT at SI level (exact timing)
-/// 3. True rollback: LOAD_STATE → SET_INPUT → FRAME_ADVANCE loop
-/// 4. Full emulator state save/load (not just 2-4KB)
+/// HOW IT WORKS:
+/// 1. Wait for FRAME_BOUNDARY event from Dolphin IPC
+/// 2. Read local controller input from Dolphin's memory (port 0 = physical controller)
+/// 3. Send local input to remote player via UDP
+/// 4. Get remote input (confirmed or predicted)
+/// 5. Inject remote input via IPC SET_INPUT (frame-perfect SI-level injection)
+/// 6. If guest (P2): also redirect local port 0 input to port 1 via IPC
+/// 7. Save emulator state via IPC
+/// 8. If rollback needed: LOAD_STATE → SET_INPUT + FRAME_ADVANCE loop
 pub async fn run_ipc_game_loop(
     ipc: Arc<HWClient>,
     rb_state: Arc<Mutex<RollbackState>>,
+    dolphin_state: Arc<Mutex<DolphinMemState>>,
     netplay_state: Arc<Mutex<NetplayState>>,
-    local_player: u8, // 0 = P1, 1 = P2
+    local_player: u8, // 0 = P1 (host), 1 = P2 (guest)
 ) {
     let remote_player = if local_player == 0 { 1u8 } else { 0u8 };
     let mut current_frame: u32 = 0;
+    let mut mem_attached = false;
 
-    // Local input history for rollback resimulation
-    let mut local_input_history: HashMap<u32, HWPadInput> = HashMap::with_capacity(300);
-    let mut remote_input_history: HashMap<u32, HWPadInput> = HashMap::with_capacity(300);
-
-    // Config
     let config = {
         let rs = rb_state.lock().unwrap();
         rs.engine.config.clone()
     };
 
-    eprintln!("[rollback_ipc] Starting IPC game loop (player {}, delay {}, max_rb {})",
-        local_player + 1, config.input_delay, config.max_rollback);
+    crate::diagnostics::log_info(&format!(
+        "IPC game loop starting: player={} ({}), delay={}, max_rb={}",
+        local_player + 1,
+        if local_player == 0 { "HOST/P1" } else { "GUEST/P2" },
+        config.input_delay, config.max_rollback
+    ));
 
-    // Wait for IPC connection to be ready
+    // Verify IPC connection
     if let Err(e) = ipc.ping().await {
-        eprintln!("[rollback_ipc] IPC ping failed: {}", e);
+        crate::diagnostics::log_error(&format!("IPC ping failed: {}", e));
         return;
     }
-    eprintln!("[rollback_ipc] IPC connection verified");
+    crate::diagnostics::log_ipc("IPC connection verified");
+
+    // Try to attach to Dolphin's memory for reading local controller input.
+    // We retry until attached — Dolphin needs a moment to start.
+    #[cfg(windows)]
+    fn try_attach_mem(ds: &mut DolphinMemState) -> bool {
+        if ds.memory.is_some() { return true; }
+        match crate::dolphin_mem::find_dolphin_pid() {
+            Ok(pid) => {
+                match crate::dolphin_mem::DolphinMemory::attach(pid) {
+                    Ok(mem) => {
+                        ds.memory = Some(mem);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    fn try_attach_mem(_ds: &mut DolphinMemState) -> bool { false }
 
     loop {
         // Check if we should stop
@@ -66,13 +117,24 @@ pub async fn run_ipc_game_loop(
             }
         }
 
+        // Ensure memory is attached (for reading local input)
+        if !mem_attached {
+            let mut ds = dolphin_state.lock().unwrap();
+            mem_attached = try_attach_mem(&mut ds);
+            if !mem_attached {
+                // Can't read input yet — wait and retry
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            crate::diagnostics::log_info("Memory attached to Dolphin for input reading");
+        }
+
         // Wait for next frame boundary from Dolphin
         let frame = match ipc.wait_frame().await {
             Ok(f) => f as u32,
             Err(_) => {
-                // Timeout — check if still connected
                 if !ipc.is_connected() {
-                    eprintln!("[rollback_ipc] IPC disconnected");
+                    crate::diagnostics::log_error("IPC disconnected");
                     break;
                 }
                 continue;
@@ -82,64 +144,43 @@ pub async fn run_ipc_game_loop(
         current_frame = frame;
 
         // Debug logging
-        if current_frame <= 3 || current_frame % 120 == 0 {
+        if current_frame <= 5 || current_frame % 120 == 0 {
             let np = netplay_state.lock().unwrap();
             let remote_count = np.session.as_ref()
                 .map(|s| s.input_buffer.remote.len()).unwrap_or(0);
             let has_peer = np.session.as_ref()
                 .map(|s| s.peer_addr.is_some()).unwrap_or(false);
-            eprintln!("[rollback_ipc] F{} P{} peer={} remote_inputs={}",
-                current_frame, local_player + 1, has_peer, remote_count);
+            crate::diagnostics::log_info(&format!(
+                "F{} P{} peer={} remote_inputs={}",
+                current_frame, local_player + 1, has_peer, remote_count
+            ));
         }
 
-        // ── Step 1: Save state for this frame ──
-        let save_start = Instant::now();
-        let slot = slot_for_frame(current_frame);
-        if let Err(e) = ipc.save_state(slot).await {
-            eprintln!("[rollback_ipc] Save state failed: {}", e);
-        }
-        let save_ms = save_start.elapsed().as_secs_f64() * 1000.0;
-
-        // ── Step 2: Read local input (physical controller is always port 0) ──
-        // With IPC, Dolphin handles reading the physical controller automatically.
-        // We need to TELL Dolphin what the remote player's input should be.
-        // The local player's input flows naturally through the controller.
-        // But we still need to READ it to send it over the network.
-        //
-        // For now, we let the physical controller pass through for the local player
-        // and inject the remote player's input via SET_INPUT.
-
-        // Get local input from the netplay session (read from PAD buffer on Dolphin side)
-        // Actually, with our fork, Dolphin reads physical input directly via SI.
-        // We need to send a "get current input" command or hook it differently.
-        //
-        // For the first iteration: the local player's physical controller input
-        // goes through normally. We only need to SET_INPUT for the remote port.
-
-        // ── Step 3: Send local input over network ──
-        // NOTE: In the IPC model, Dolphin reads the local controller directly.
-        // We need to extract what it read. For now, we let the controller pass
-        // through and just handle the remote side.
-        // TODO: Add READ_INPUT command to IPC for reading what the controller sent.
-
-        // Get the network input for this frame
-        let local_input_for_net = {
-            let np = netplay_state.lock().unwrap();
-            if let Some(session) = &np.session {
-                session.input_buffer.local.get(&current_frame).cloned()
-            } else {
-                None
+        // ── Step 1: Read local input from Dolphin memory (port 0 = physical controller) ──
+        let local_input = {
+            let ds = dolphin_state.lock().unwrap();
+            match &ds.memory {
+                Some(mem) => mem.read_pad_input(0).unwrap_or_default(),
+                None => {
+                    mem_attached = false;
+                    GCPadStatus::default()
+                }
             }
         };
+        let local_frame_input = pad_to_frame_input(&local_input);
 
-        // If we have local input, send it
-        if let Some(input) = local_input_for_net {
+        // ── Step 2: Send local input to remote via UDP ──
+        {
             let mut np = netplay_state.lock().unwrap();
             if let Some(session) = &mut np.session {
+                // Record in input buffer (for rollback replay)
+                session.input_buffer.add_local(current_frame, local_frame_input);
+
+                // Send over network
                 let packet = crate::netplay::InputPacket {
                     frame: current_frame,
                     player_id: local_player,
-                    input,
+                    input: local_frame_input,
                     checksum: 0,
                 };
                 if let Some(ref tx) = session.send_tx {
@@ -148,7 +189,7 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 4: Process received remote inputs ──
+        // ── Step 3: Process received remote inputs ──
         let rollback_frames = {
             let mut np = netplay_state.lock().unwrap();
             match &mut np.session {
@@ -157,7 +198,7 @@ pub async fn run_ipc_game_loop(
             }
         };
 
-        // ── Step 5: Handle rollback if needed ──
+        // ── Step 4: Handle rollback if needed ──
         if !rollback_frames.is_empty() {
             let earliest = rollback_frames[0];
             let depth = current_frame.saturating_sub(earliest);
@@ -165,48 +206,47 @@ pub async fn run_ipc_game_loop(
             if depth > 0 && depth <= config.max_rollback {
                 let rb_start = Instant::now();
 
-                // TRUE ROLLBACK: load state → replay with correct inputs
                 let rollback_slot = slot_for_frame(earliest);
                 if let Err(e) = ipc.load_state(rollback_slot).await {
-                    eprintln!("[rollback_ipc] Load state failed: {}", e);
+                    crate::diagnostics::log_error(&format!("Rollback load_state failed: {}", e));
                 } else {
-                    // Pause emulation for controlled replay
                     let _ = ipc.pause().await;
 
-                    // Collect inputs FIRST (hold lock briefly), then do IPC calls
+                    // Collect inputs (brief lock)
                     let replay_inputs: Vec<(HWPadInput, HWPadInput)> = {
                         let np = netplay_state.lock().unwrap();
                         if let Some(session) = &np.session {
                             (earliest..current_frame).map(|f| {
-                                let local_input = session.input_buffer.local.get(&f);
-                                let remote_input = session.input_buffer.remote.get(&f);
-                                let local_pad = local_input.map(|i| frame_input_to_pad(i)).unwrap_or_default();
-                                let remote_pad = remote_input.map(|i| frame_input_to_pad(i)).unwrap_or_default();
+                                let local = session.input_buffer.local.get(&f);
+                                let remote = session.input_buffer.remote.get(&f);
+                                let local_pad = local.map(|i| frame_input_to_pad(i)).unwrap_or_default();
+                                let remote_pad = remote.map(|i| frame_input_to_pad(i)).unwrap_or_default();
+                                // P1 = port 0, P2 = port 1
                                 if local_player == 0 {
-                                    (local_pad, remote_pad)
+                                    (local_pad, remote_pad) // Host: local=P1, remote=P2
                                 } else {
-                                    (remote_pad, local_pad)
+                                    (remote_pad, local_pad) // Guest: remote=P1, local=P2
                                 }
                             }).collect()
                         } else {
                             vec![]
                         }
-                    }; // Lock dropped here
+                    };
 
-                    // Now replay with IPC (no lock held)
+                    // Replay frames with correct inputs
                     for (p1_pad, p2_pad) in &replay_inputs {
                         let _ = ipc.set_input(0, p1_pad).await;
                         let _ = ipc.set_input(1, p2_pad).await;
                         let _ = ipc.frame_advance().await;
                     }
 
-                    // Clear input overrides and resume
                     let _ = ipc.clear_input(0).await;
                     let _ = ipc.clear_input(1).await;
                     let _ = ipc.resume().await;
 
-                    // Update rollback stats
                     let rb_ms = rb_start.elapsed().as_secs_f64() * 1000.0;
+                    crate::diagnostics::log_rollback(earliest, current_frame, rb_ms);
+
                     let mut rs = rb_state.lock().unwrap();
                     rs.engine.stats.rollback_count += 1;
                     rs.engine.stats.total_rollback_frames += depth as u64;
@@ -223,19 +263,22 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 6: Inject remote player's current frame input ──
+        // ── Step 5: Inject remote input + handle P2 routing ──
         {
             let mut np = netplay_state.lock().unwrap();
             if let Some(session) = &mut np.session {
                 let (remote_input, is_predicted) = session.input_buffer.get_remote(current_frame);
                 let remote_pad = frame_input_to_pad(&remote_input);
 
-                // Inject remote input on the remote player's port
+                // Inject remote player's input on their port
                 let _ = ipc.set_input(remote_player as u32, &remote_pad).await;
 
-                // If we're P2, also redirect our local input (port 0 → port 1)
-                // Actually with the fork, the local controller goes through SI directly.
-                // We only need to inject the REMOTE player's input.
+                // CRITICAL: If we're the GUEST (P2), our physical controller is port 0
+                // but we need to be P2 (port 1). Redirect our input to port 1.
+                if local_player == 1 {
+                    let local_pad = frame_input_to_pad(&local_frame_input);
+                    let _ = ipc.set_input(1, &local_pad).await;
+                }
 
                 // Track prediction stats
                 let mut rs = rb_state.lock().unwrap();
@@ -250,7 +293,17 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 7: Update stats ──
+        // ── Step 6: Save state for this frame ──
+        let save_start = Instant::now();
+        let slot = slot_for_frame(current_frame);
+        if let Err(e) = ipc.save_state(slot).await {
+            if current_frame <= 5 {
+                crate::diagnostics::log_error(&format!("Save state failed F{}: {}", current_frame, e));
+            }
+        }
+        let save_ms = save_start.elapsed().as_secs_f64() * 1000.0;
+
+        // ── Step 7: Update stats + ping ──
         {
             let mut np = netplay_state.lock().unwrap();
             if let Some(session) = &mut np.session {
@@ -268,31 +321,9 @@ pub async fn run_ipc_game_loop(
                 rs.engine.stats.save_state_ms = save_ms;
             }
         }
-
-        // Prune old input history
-        if current_frame > 300 {
-            let cutoff = current_frame - 300;
-            local_input_history.retain(|&f, _| f > cutoff);
-            remote_input_history.retain(|&f, _| f > cutoff);
-        }
     }
 
-    eprintln!("[rollback_ipc] Game loop ended at frame {}", current_frame);
-
-    // Clear any input overrides
+    crate::diagnostics::log_info(&format!("IPC game loop ended at frame {}", current_frame));
     let _ = ipc.clear_input(0).await;
     let _ = ipc.clear_input(1).await;
-}
-
-/// Convert FrameInput (network format) to HWPadInput (IPC format).
-fn frame_input_to_pad(input: &FrameInput) -> HWPadInput {
-    HWPadInput {
-        buttons: input.buttons,
-        stick_x: input.stick_x,
-        stick_y: input.stick_y,
-        cstick_x: input.cstick_x,
-        cstick_y: input.cstick_y,
-        trigger_l: input.trigger_l,
-        trigger_r: input.trigger_r,
-    }
 }

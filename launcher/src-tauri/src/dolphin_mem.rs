@@ -2033,7 +2033,7 @@ pub struct FullDebugReport {
 // ── Helpers ──
 
 #[cfg(windows)]
-fn find_dolphin_pid() -> Result<u32, String> {
+pub fn find_dolphin_pid() -> Result<u32, String> {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
