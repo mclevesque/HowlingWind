@@ -1,0 +1,31 @@
+# Build artifacts
+launcher/src-tauri/target/
+launcher/node_modules/
+launcher/dist/
+
+# Dolphin binaries (too large for git)
+dolphin/
+dist/HowlingWind/dolphin/
+
+# Game ISOs (copyrighted)
+games/
+dist/HowlingWind/games/
+
+# Distribution zip (uploaded to GitHub Releases instead)
+dist/*.zip
+
+# Debug output
+debug_report.txt
+fast_input_scan.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Tauri dev
+launcher/.claude/start-dev.bat
+launcher/.claude/start-vite.cmd

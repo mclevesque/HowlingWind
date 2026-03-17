@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;700;900&display=swap');
+
+:root {
+  --bg-primary: #0c0a0f;
+  --bg-secondary: #14111a;
+  --bg-card: #1c1824;
+  --bg-card-hover: #241f2e;
+  --accent-primary: #ff6b00;
+  --accent-secondary: #e23e00;
+  --accent-glow: #ff8c3a;
+  --wind-cyan: #ff6b00;
+  --wind-teal: #e23e00;
+  --text-primary: #f1f0f5;
+  --text-secondary: #9490a3;
+  --text-muted: #564f65;
+  --danger: #ef4444;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --border: #2a2436;
+  --shadow-glow: 0 0 20px rgba(255, 107, 0, 0.15);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Rajdhani', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font-family: 'Rajdhani', sans-serif;
+  cursor: pointer;
+  border: none;
+  outline: none;
+}
+
+input, select {
+  font-family: 'Rajdhani', sans-serif;
+  outline: none;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 3px;
+}
