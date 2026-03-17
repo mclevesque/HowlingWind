@@ -407,6 +407,7 @@
     // Try attaching first — if it works, Dolphin is already running with a game
     try {
       await invoke("dolphin_mem_attach");
+      netplayStatus = "Dolphin already running!";
       return true;
     } catch {
       // Not running or no game loaded — launch it
@@ -414,9 +415,11 @@
 
     netplayStatus = "Launching Dolphin...";
     try {
-      await invoke("launch_dolphin", { mode: "netplay", isoOverride: null });
+      // Don't pass isoOverride at all — let Rust use settings.iso_path
+      await invoke("launch_dolphin", { mode: "netplay" });
     } catch (e: any) {
       netplayStatus = `Failed to launch Dolphin: ${e}`;
+      error = `Dolphin launch error: ${e}`;
       return false;
     }
 
@@ -424,6 +427,7 @@
     netplayStatus = "Waiting for game to load...";
     for (let attempt = 0; attempt < 30; attempt++) {
       await new Promise((r) => setTimeout(r, 2000));
+      netplayStatus = `Waiting for game to load... (${attempt + 1}/30)`;
       try {
         await invoke("dolphin_mem_attach");
         netplayStatus = "Dolphin ready!";
@@ -433,6 +437,7 @@
       }
     }
     netplayStatus = "Timed out waiting for Dolphin. Launch it manually and load GNT4.";
+    error = "Dolphin timed out. Check Settings to make sure Dolphin and ISO paths are correct.";
     return false;
   }
 
@@ -466,9 +471,14 @@
         publicAddr = await invoke("stun_discover") as string;
         netplayStatus = `Public address: ${publicAddr}. Exchanging with peer...`;
       } catch {
-        // STUN failed — fall back to local port only (LAN play)
-        publicAddr = `127.0.0.1:${port}`;
-        netplayStatus = `STUN failed, using local address. Exchanging...`;
+        // STUN failed — fall back to LAN IP for same-network play
+        try {
+          const lanIp: string = await invoke("get_local_ip");
+          publicAddr = `${lanIp}:${port}`;
+        } catch {
+          publicAddr = `127.0.0.1:${port}`;
+        }
+        netplayStatus = `STUN failed, using LAN address ${publicAddr}. Exchanging...`;
       }
 
       // Exchange addresses via Firebase signaling

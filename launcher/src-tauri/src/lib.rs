@@ -269,6 +269,18 @@ fn game_short_id(game_id: &str) -> String {
 }
 
 #[tauri::command]
+fn get_local_ip() -> Result<String, String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("Failed to bind socket: {}", e))?;
+    // Connect to a public IP to determine our local network IP (no data sent)
+    socket.connect("8.8.8.8:80")
+        .map_err(|e| format!("Failed to determine local IP: {}", e))?;
+    let local_addr = socket.local_addr()
+        .map_err(|e| format!("Failed to get local addr: {}", e))?;
+    Ok(local_addr.ip().to_string())
+}
+
+#[tauri::command]
 fn scan_games() -> Vec<GameInfo> {
     let mut games: Vec<GameInfo> = Vec::new();
     let mut games_dirs: Vec<PathBuf> = Vec::new();
@@ -1514,6 +1526,7 @@ pub fn run() {
             updater::check_for_updates,
             updater::download_update,
             updater::get_app_version,
+            get_local_ip,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
