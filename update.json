@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.0/HowlingWind-v0.2.0.zip",
-  "notes": "v0.2.0 - HowlingWind Dolphin Fork! Bundled custom Dolphin with IPC-based rollback, built-in diagnostics logging, no more external Dolphin dependency."
+  "version": "0.2.1",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.1/HowlingWind-v0.2.1.zip",
+  "notes": "v0.2.1 - Frameless window, voice chat, GC adapter support, Dolphin exit fix"
 }

@@ -3,6 +3,17 @@
   import { listen } from "@tauri-apps/api/event";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+
+  // Custom title bar controls
+  const appWindow = getCurrentWindow();
+  let isMaximized = $state(false);
+  appWindow.isMaximized().then(m => isMaximized = m);
+  async function minimizeWindow() { await appWindow.minimize(); }
+  async function toggleMaximize() {
+    await appWindow.toggleMaximize();
+    isMaximized = await appWindow.isMaximized();
+  }
+  async function closeWindow() { await appWindow.close(); }
   import Sidebar from "./lib/Sidebar.svelte";
   import MainMenu from "./routes/MainMenu.svelte";
   import PlayOnline from "./routes/PlayOnline.svelte";
@@ -12,11 +23,17 @@
   import RollbackTest from "./routes/RollbackTest.svelte";
   import DebugPlay from "./routes/DebugPlay.svelte";
   import MatchResults from "./lib/MatchResults.svelte";
+  import VoiceChat from "./lib/VoiceChat.svelte";
   import { initAudio, startAmbientWind, resumeAudio, onGameStart, onGameEnd, temporaryUnduck, playSfx } from "./lib/audio";
   import { recordMatchResult, calculateEloDelta, ensurePlayerRating } from "./lib/firebase";
 
   let currentRoute = $state("home");
   let gameRunning = $state(false);
+
+  // Voice chat state — persists across routes and during gameplay
+  let voiceChatVisible = $state(false);
+  let voiceChatRoomId = $state("");
+  let voiceChatPlayerId = $state("");
 
   // Auto-updater
   let updateAvailable = $state(false);
@@ -183,14 +200,55 @@
     document.addEventListener("keydown", handleFirstInteraction, { once: true });
   }
 
+  // Voice chat activation — triggered from PlayOnline when joining a room
+  listen("voice-chat-start", (event: any) => {
+    voiceChatRoomId = event.payload.roomId || "";
+    voiceChatPlayerId = event.payload.playerId || "";
+    voiceChatVisible = true;
+  });
+  listen("voice-chat-stop", () => {
+    voiceChatVisible = false;
+    voiceChatRoomId = "";
+    voiceChatPlayerId = "";
+  });
+
   listen("game-embedded", () => {
     gameRunning = true;
     onGameStart(); // Duck UI audio
     startWinDetection(); // Poll for match end
+    startDolphinMonitor(); // Watch for Dolphin exit
   });
+
+  // Monitor Dolphin process — if it exits, return to menu (don't close app)
+  let dolphinMonitorInterval: number | null = null;
+  function startDolphinMonitor() {
+    if (dolphinMonitorInterval) return;
+    dolphinMonitorInterval = window.setInterval(async () => {
+      try {
+        // Check if Dolphin is still running by trying to resize (will fail if dead)
+        const win = getCurrentWindow();
+        const size = await win.innerSize();
+        await invoke("resize_embedded", { width: size.width, height: size.height });
+      } catch {
+        // Dolphin process died — return to menu
+        stopDolphinMonitor();
+        stopWinDetection();
+        gameRunning = false;
+        onGameEnd();
+        try { await invoke("stop_dolphin"); } catch {}
+      }
+    }, 2000);
+  }
+  function stopDolphinMonitor() {
+    if (dolphinMonitorInterval) {
+      clearInterval(dolphinMonitorInterval);
+      dolphinMonitorInterval = null;
+    }
+  }
 
   async function stopGame() {
     stopWinDetection();
+    stopDolphinMonitor();
     await invoke("stop_dolphin");
     gameRunning = false;
     onGameEnd(); // Restore UI audio
@@ -216,6 +274,30 @@
     window.addEventListener("keydown", handleKeydown);
   }
 </script>
+
+<!-- Custom title bar (frameless window) -->
+<div class="titlebar" data-tauri-drag-region>
+  <div class="titlebar-logo" data-tauri-drag-region>
+    <span class="titlebar-icon">🌀</span>
+    <span class="titlebar-text" data-tauri-drag-region>HOWLINGWIND</span>
+    {#if appVersion}<span class="titlebar-version">v{appVersion}</span>{/if}
+  </div>
+  <div class="titlebar-controls">
+    <button class="titlebar-btn" onclick={minimizeWindow} title="Minimize">
+      <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+    </button>
+    <button class="titlebar-btn" onclick={toggleMaximize} title={isMaximized ? "Restore" : "Maximize"}>
+      {#if isMaximized}
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 0h8v8H8v2H0V2h2V0zm1 3v5h5V3H3zm4-2H3v1h5v5h1V1H7z" fill="currentColor"/></svg>
+      {:else}
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0" y="0" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      {/if}
+    </button>
+    <button class="titlebar-btn titlebar-close" onclick={closeWindow} title="Close">
+      <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+</div>
 
 <div class="app-container" class:game-mode={gameRunning}>
   {#if updateAvailable}
@@ -273,6 +355,14 @@
   {/if}
 </div>
 
+<!-- Voice Chat Widget (persists during gameplay) -->
+<VoiceChat
+  visible={voiceChatVisible}
+  roomId={voiceChatRoomId}
+  playerId={voiceChatPlayerId}
+  onClose={() => voiceChatVisible = false}
+/>
+
 <!-- Match Results Overlay (renders on top of everything) -->
 <MatchResults
   visible={showMatchResults}
@@ -292,8 +382,9 @@
 <style>
   .app-container {
     display: flex;
-    height: 100vh;
+    height: calc(100vh - 32px);
     width: 100vw;
+    margin-top: 32px;
     background: var(--bg-primary);
   }
 
@@ -423,6 +514,69 @@
   @keyframes pulse-glow {
     0%, 100% { box-shadow: 0 0 4px rgba(34, 211, 238, 0.3); }
     50% { box-shadow: 0 0 12px rgba(34, 211, 238, 0.6); }
+  }
+
+  /* Custom title bar */
+  .titlebar {
+    height: 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #0a0a0f;
+    border-bottom: 1px solid rgba(34, 211, 238, 0.15);
+    user-select: none;
+    -webkit-user-select: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 99999;
+  }
+  .titlebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-left: 12px;
+  }
+  .titlebar-icon {
+    font-size: 14px;
+  }
+  .titlebar-text {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: var(--wind-cyan, #22d3ee);
+  }
+  .titlebar-version {
+    font-size: 9px;
+    color: var(--text-muted, #555);
+    font-family: 'Orbitron', monospace;
+    letter-spacing: 1px;
+  }
+  .titlebar-controls {
+    display: flex;
+    height: 100%;
+  }
+  .titlebar-btn {
+    width: 46px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .titlebar-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+  }
+  .titlebar-close:hover {
+    background: #e81123;
+    color: #fff;
   }
 
 </style>

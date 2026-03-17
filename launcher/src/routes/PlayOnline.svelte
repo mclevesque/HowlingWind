@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { emit } from "@tauri-apps/api/event";
   import { playSfx } from "../lib/audio";
   import {
     initFirebase,
@@ -230,6 +231,8 @@
       currentRoom = room;
       if (!room) { currentRoomId = ""; currentRoom = null; isHost = false; }
     });
+    // Start voice chat when entering a room
+    emit("voice-chat-start", { roomId, playerId });
   }
 
   function formatSearchTime(seconds: number): string {
@@ -388,6 +391,8 @@
     currentRoomId = "";
     currentRoom = null;
     isHost = false;
+    // Stop voice chat when leaving lobby
+    emit("voice-chat-stop", {});
   }
 
   /** Guest clicks READY — mark ready in Firebase and listen for host's start signal. */

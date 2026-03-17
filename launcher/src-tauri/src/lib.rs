@@ -583,6 +583,43 @@ fn gcpad_ini_path_portable(dolphin_path: &str) -> Option<PathBuf> {
 
 /// Write default XInput GCPad mapping to all relevant Dolphin config locations.
 /// Called automatically before launching Dolphin if a controller is detected.
+/// Configure Dolphin to use a GC adapter (Wii U / Mayflash in Wii U mode).
+/// This writes to Dolphin.ini to enable the SI adapter and to GCPadNew.ini
+/// to set port 1 to use the adapter instead of SDL/emulated input.
+fn configure_gc_adapter(dolphin_path: &str) {
+    let dolphin = PathBuf::from(dolphin_path);
+
+    // Find Dolphin.ini (portable or user dir)
+    let ini_paths: Vec<PathBuf> = [
+        dolphin.parent().map(|d| d.join("portable.ini")).filter(|p| p.exists())
+            .and_then(|_| dolphin.parent().map(|d| d.join("User").join("Config").join("Dolphin.ini"))),
+        dolphin.parent().map(|d| d.join("User").join("Config").join("Dolphin.ini")),
+        {
+            let appdata = std::env::var("APPDATA").unwrap_or_default();
+            if appdata.is_empty() { None } else { Some(PathBuf::from(appdata).join("Dolphin Emulator").join("Config").join("Dolphin.ini")) }
+        },
+    ].into_iter().flatten().collect();
+
+    for ini_path in &ini_paths {
+        if let Some(parent) = ini_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        let mut content = fs::read_to_string(ini_path).unwrap_or_default();
+
+        // Ensure [Core] section has SIDevice0 = 12 (GC Adapter)
+        if !content.contains("SIDevice0 = 12") {
+            if content.contains("[Core]") {
+                content = content.replace("[Core]", "[Core]\nSIDevice0 = 12");
+            } else {
+                content.push_str("\n[Core]\nSIDevice0 = 12\n");
+            }
+            let _ = fs::write(ini_path, &content);
+            eprintln!("[gcpad] Configured GC adapter in {:?}", ini_path);
+        }
+    }
+}
+
 fn ensure_gcpad_config(dolphin_path: &str) {
     // Try to read existing device name from any GCPadNew.ini
     let existing_device = {
@@ -611,17 +648,33 @@ fn ensure_gcpad_config(dolphin_path: &str) {
         device
     };
 
-    // Use existing SDL device, or fall back to common SDL name
+    // Use existing SDL device, or try to auto-detect.
+    // Dolphin uses SDL for controller input. The device name varies by controller:
+    //   Xbox: "SDL/0/Xbox One S Controller", "SDL/0/Xbox 360 Controller"
+    //   PS4/PS5: "SDL/0/PS4 Controller", "SDL/0/DualSense Wireless Controller"
+    //   GC Adapter: Uses "GameCube Adapter" mode in Dolphin (separate from GCPad)
+    //   Generic: "SDL/0/USB Gamepad" etc.
     let device_name = if !existing_device.is_empty() {
         existing_device
     } else {
-        // Check if XInput detects anything (to confirm a controller exists)
+        // Check if any controller is connected via XInput
         let controllers = controllers::detect_controllers();
         if controllers.is_empty() {
-            return; // No controller at all
+            // No XInput controller — might be GC adapter or DInput device.
+            // Try common SDL names that Dolphin recognizes.
+            // If none work, Dolphin will fall back to keyboard.
+            // GC adapters are handled separately by Dolphin's "GameCube Adapter" setting.
+            eprintln!("[gcpad] No XInput controller found. Trying SDL auto-detect...");
+
+            // Check if a GC adapter is connected (Zadig/WUP driver)
+            // If so, configure Dolphin to use the GC Adapter directly
+            configure_gc_adapter(dolphin_path);
+            return; // Don't write GCPad config — GC adapter bypasses it
         }
-        // Default to SDL device name (Dolphin typically uses SDL, not XInput)
-        "SDL/0/Xbox One S Controller".to_string()
+        // XInput controller found — use the controller name from detection
+        // Dolphin's SDL backend prefixes with "SDL/0/"
+        let ctrl_name = &controllers[0].name;
+        format!("SDL/0/{}", ctrl_name)
     };
 
     // SDL button names: A=South, B=East, X=West, Y=North
