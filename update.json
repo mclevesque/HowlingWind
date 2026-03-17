@@ -1,5 +1,5 @@
 {
-  "version": "0.1.2",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.2/HowlingWind-v0.1.2.zip",
-  "notes": "Fixed auto-updater: downloads, installs, and restarts properly"
+  "version": "0.1.3",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.1.3/HowlingWind-v0.1.3.zip",
+  "notes": "Ready-up system, flexible ISO detection, better lobby flow"
 }
