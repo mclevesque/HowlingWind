@@ -23,8 +23,6 @@
     { id: "practice", label: "PRACTICE", icon: "&#9876;" },
     { id: "leaderboard", label: "RANKINGS", icon: "&#9733;" },
     { id: "settings", label: "SETTINGS", icon: "&#9881;" },
-    { id: "debug", label: "DEBUG PLAY", icon: "&#128269;" },
-    { id: "test", label: "TEST LAB", icon: "&#9889;" },
   ];
 </script>
 

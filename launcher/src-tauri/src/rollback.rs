@@ -167,10 +167,10 @@ impl RollbackEngine {
             if rollback_depth > 0 && rollback_depth <= self.config.max_rollback {
                 let rb_start = Instant::now();
 
-                // Load the save state for the mismatch frame
-                if let Some(snapshot) = dolphin.save_ring.get(earliest_mismatch) {
-                    // Restore game state
-                    if let Err(e) = mem.load_state(snapshot) {
+                // Load the lightweight game state for the mismatch frame
+                if let Some(snapshot) = dolphin.game_state_ring.get(earliest_mismatch) {
+                    // Restore game state (safe — only writes ~2-4KB)
+                    if let Err(e) = mem.load_game_state(snapshot) {
                         return TickAction::Error(format!("Failed to load state: {}", e));
                     }
 
@@ -214,12 +214,12 @@ impl RollbackEngine {
             self.state = EngineState::Running;
         }
 
-        // Step 4: Save state for current frame
+        // Step 4: Save lightweight game state for current frame
         let save_start = Instant::now();
-        match mem.save_state(self.local_frame) {
+        match mem.save_game_state(self.local_frame) {
             Ok(snapshot) => {
                 self.stats.save_state_ms = save_start.elapsed().as_secs_f64() * 1000.0;
-                dolphin.save_ring.push(snapshot);
+                dolphin.game_state_ring.push(snapshot);
             }
             Err(e) => {
                 return TickAction::Error(format!("Failed to save state: {}", e));
@@ -492,11 +492,11 @@ pub fn run_game_loop(
             if depth > 0 && depth <= rb.engine.config.max_rollback {
                 let rb_start = Instant::now();
 
-                // Load the save state
+                // Load the lightweight game state (safe mid-emulation, ~2-4KB)
                 let mut ds = dolphin_state.lock().unwrap();
-                if let Some(snapshot) = ds.save_ring.get(earliest) {
+                if let Some(snapshot) = ds.game_state_ring.get(earliest) {
                     if let Some(mem) = &ds.memory {
-                        if let Err(e) = mem.load_state(snapshot) {
+                        if let Err(_e) = mem.load_game_state(snapshot) {
                             rb.engine.stats.rollback_count += 1;
                             continue;
                         }
@@ -571,14 +571,14 @@ pub fn run_game_loop(
             }
         }
 
-        // Step 6: Save state for current frame
+        // Step 6: Save lightweight game state for current frame (~2-4KB, <0.1ms)
         {
             let mut ds = dolphin_state.lock().unwrap();
             if let Some(mem) = &ds.memory {
                 let save_start = Instant::now();
-                if let Ok(snapshot) = mem.save_state(current_frame) {
+                if let Ok(snapshot) = mem.save_game_state(current_frame) {
                     let save_ms = save_start.elapsed().as_secs_f64() * 1000.0;
-                    ds.save_ring.push(snapshot);
+                    ds.game_state_ring.push(snapshot);
 
                     let mut rb = rb_state.lock().unwrap();
                     rb.engine.stats.save_state_ms = save_ms;

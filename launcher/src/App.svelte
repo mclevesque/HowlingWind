@@ -24,6 +24,10 @@
   let updateUrl = $state("");
   let updateNotes = $state("");
   let updateDownloading = $state(false);
+  let updatePercent = $state(0);
+  let updatePhase = $state(""); // downloading | extracting | done | error
+  let updateMessage = $state("");
+  let updateComplete = $state(false);
   let appVersion = $state("");
 
   // Check for updates on launch
@@ -42,17 +46,38 @@
     }
   })();
 
+  // Listen for download progress events
+  listen("update-progress", (event: any) => {
+    const p = event.payload;
+    updatePercent = p.percent;
+    updatePhase = p.phase;
+    updateMessage = p.message;
+    if (p.phase === "done") {
+      updateComplete = true;
+      updateDownloading = false;
+    } else if (p.phase === "error") {
+      updateDownloading = false;
+    }
+  });
+
   async function downloadAndApplyUpdate() {
     if (!updateUrl) return;
     updateDownloading = true;
+    updatePercent = 0;
+    updatePhase = "downloading";
+    updateMessage = "Starting download...";
     try {
-      const path: string = await invoke("download_update", { url: updateUrl });
-      // Tell user to extract and restart
-      updateNotes = `Downloaded to ${path}. Extract the zip and replace your current files, then restart HowlingWind.`;
+      await invoke("download_update", { url: updateUrl });
     } catch (e: any) {
-      updateNotes = `Download failed: ${e}`;
+      updateMessage = `Update failed: ${e}`;
+      updatePhase = "error";
+      updateDownloading = false;
     }
-    updateDownloading = false;
+  }
+
+  function restartApp() {
+    // Close and let user reopen — exe was replaced in-place
+    window.close();
   }
 
 
@@ -190,14 +215,29 @@
 <div class="app-container" class:game-mode={gameRunning}>
   {#if updateAvailable}
     <div class="update-banner">
-      <span class="update-text">HowlingWind v{updateVersion} available!</span>
-      {#if updateNotes}<span class="update-notes">{updateNotes}</span>{/if}
-      {#if !updateDownloading}
-        <button class="update-btn" onclick={downloadAndApplyUpdate}>Download</button>
+      {#if updateComplete}
+        <span class="update-text">Update installed!</span>
+        <span class="update-notes">Restart HowlingWind to use v{updateVersion}</span>
+        <button class="update-btn restart-btn" onclick={restartApp}>RESTART NOW</button>
+      {:else if updateDownloading}
+        <span class="update-text">
+          {updatePhase === "extracting" ? "Extracting..." : "Downloading v" + updateVersion + "..."}
+        </span>
+        <div class="update-progress-bar">
+          <div class="update-progress-fill" style="width: {updatePercent}%"></div>
+        </div>
+        <span class="update-percent">{Math.round(updatePercent)}%</span>
+      {:else if updatePhase === "error"}
+        <span class="update-text">Update failed</span>
+        <span class="update-notes">{updateMessage}</span>
+        <button class="update-btn" onclick={downloadAndApplyUpdate}>Retry</button>
+        <button class="update-dismiss" onclick={() => updateAvailable = false}>x</button>
       {:else}
-        <span class="update-downloading">Downloading...</span>
+        <span class="update-text">HowlingWind v{updateVersion} available!</span>
+        {#if updateNotes}<span class="update-notes">{updateNotes}</span>{/if}
+        <button class="update-btn" onclick={downloadAndApplyUpdate}>Download Update</button>
+        <button class="update-dismiss" onclick={() => updateAvailable = false}>x</button>
       {/if}
-      <button class="update-dismiss" onclick={() => updateAvailable = false}>x</button>
     </div>
   {/if}
   {#if !gameRunning}
@@ -348,5 +388,36 @@
     padding: 0 4px;
   }
   .update-dismiss:hover { color: var(--text-primary, #fff); }
+
+  /* Progress bar */
+  .update-progress-bar {
+    flex: 1;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    overflow: hidden;
+    min-width: 120px;
+  }
+  .update-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--wind-cyan, #22d3ee), #6366f1);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+  .update-percent {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    color: var(--wind-cyan, #22d3ee);
+    font-weight: 700;
+    min-width: 40px;
+    text-align: right;
+  }
+  .restart-btn {
+    animation: pulse-glow 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 4px rgba(34, 211, 238, 0.3); }
+    50% { box-shadow: 0 0 12px rgba(34, 211, 238, 0.6); }
+  }
 
 </style>

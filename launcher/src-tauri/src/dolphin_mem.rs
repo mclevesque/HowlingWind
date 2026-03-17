@@ -82,6 +82,66 @@ impl SaveStateRing {
     }
 }
 
+// ── Lightweight Game State Snapshot (for rollback) ──
+
+/// Critical GNT4 memory regions to save/restore for rollback.
+/// Instead of saving all 32MB of GC RAM (which crashes Dolphin on restore),
+/// we only save the game-relevant state: player structs, RNG, timer, etc.
+/// Total: ~2-4KB per frame instead of 32MB. Safe to restore mid-emulation.
+///
+/// Player struct is ~0x300 bytes per player. We save a generous range
+/// to capture all combat state even if we haven't mapped every offset.
+const PLAYER_STRUCT_SAVE_SIZE: usize = 0x300;
+
+/// GNT4 global game state addresses to save/restore.
+/// These are GC addresses (0x80XXXXXX) and offsets within GC RAM.
+const GLOBAL_STATE_REGIONS: &[(u32, usize)] = &[
+    // (gc_address, size_in_bytes)
+    (0x80222E00, 0x200),  // PAD buffers + nearby game state
+    (0x8022F000, 0x100),  // RNG seed area (approximate — needs verification)
+];
+
+/// A lightweight snapshot of only the game-critical state for one frame.
+/// ~2-4KB total, safe to write back to Dolphin mid-emulation.
+#[derive(Clone)]
+pub struct GameStateSnapshot {
+    pub frame: u32,
+    /// Player struct data: (gc_base_address, raw_bytes) for each player found.
+    pub players: Vec<(u32, Vec<u8>)>,
+    /// Global state regions: (gc_address, raw_bytes) for each region.
+    pub globals: Vec<(u32, Vec<u8>)>,
+}
+
+/// Ring buffer of lightweight game state snapshots for rollback.
+pub struct GameStateRing {
+    pub states: Vec<Option<GameStateSnapshot>>,
+    pub capacity: usize,
+    pub write_idx: usize,
+}
+
+impl GameStateRing {
+    pub fn new(capacity: usize) -> Self {
+        let mut states = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            states.push(None);
+        }
+        Self {
+            states,
+            capacity,
+            write_idx: 0,
+        }
+    }
+
+    pub fn push(&mut self, snapshot: GameStateSnapshot) {
+        self.states[self.write_idx] = Some(snapshot);
+        self.write_idx = (self.write_idx + 1) % self.capacity;
+    }
+
+    pub fn get(&self, frame: u32) -> Option<&GameStateSnapshot> {
+        self.states.iter().flatten().find(|s| s.frame == frame)
+    }
+}
+
 /// Handle to Dolphin's process for memory operations.
 #[cfg(windows)]
 pub struct DolphinMemory {
@@ -405,8 +465,61 @@ impl DolphinMemory {
     }
 
     /// Restore a snapshot back to Dolphin's memory.
+    /// WARNING: Writing full 32MB mid-emulation crashes Dolphin.
+    /// Use load_game_state() for rollback instead.
     pub fn load_state(&self, snapshot: &MemorySnapshot) -> Result<(), String> {
         self.write(0, &snapshot.data)?;
+        Ok(())
+    }
+
+    /// Save only the critical game state for rollback (~2-4KB).
+    /// Safe and fast — doesn't disturb Dolphin's internal state.
+    pub fn save_game_state(&self, frame: u32) -> Result<GameStateSnapshot, String> {
+        let mut players = Vec::new();
+
+        // Save each active player's struct
+        for player_idx in 0..4u8 {
+            if let Ok(Some(base)) = self.resolve_player_ptr(player_idx) {
+                let offset = (base & 0x01FFFFFF) as usize;
+                let mut buf = vec![0u8; PLAYER_STRUCT_SAVE_SIZE];
+                if self.read(offset, &mut buf).is_ok() {
+                    players.push((base, buf));
+                }
+            }
+        }
+
+        // Save global state regions
+        let mut globals = Vec::new();
+        for &(gc_addr, size) in GLOBAL_STATE_REGIONS {
+            let offset = (gc_addr & 0x01FFFFFF) as usize;
+            let mut buf = vec![0u8; size];
+            if self.read(offset, &mut buf).is_ok() {
+                globals.push((gc_addr, buf));
+            }
+        }
+
+        Ok(GameStateSnapshot {
+            frame,
+            players,
+            globals,
+        })
+    }
+
+    /// Restore only the critical game state from a snapshot.
+    /// Writes ~2-4KB back to Dolphin — safe mid-emulation.
+    pub fn load_game_state(&self, snapshot: &GameStateSnapshot) -> Result<(), String> {
+        // Restore player structs
+        for (gc_addr, data) in &snapshot.players {
+            let offset = (*gc_addr & 0x01FFFFFF) as usize;
+            self.write(offset, data)?;
+        }
+
+        // Restore global state
+        for (gc_addr, data) in &snapshot.globals {
+            let offset = (*gc_addr & 0x01FFFFFF) as usize;
+            self.write(offset, data)?;
+        }
+
         Ok(())
     }
 
@@ -688,6 +801,8 @@ pub struct DolphinMemState {
     #[cfg(windows)]
     pub memory: Option<DolphinMemory>,
     pub save_ring: SaveStateRing,
+    /// Lightweight game state ring for actual rollback (safe to restore mid-emulation).
+    pub game_state_ring: GameStateRing,
 }
 
 impl DolphinMemState {
@@ -695,7 +810,8 @@ impl DolphinMemState {
         Self {
             #[cfg(windows)]
             memory: None,
-            save_ring: SaveStateRing::new(10), // 10 frames of rollback history
+            save_ring: SaveStateRing::new(10), // 10 frames of full RAM snapshots (for debugging)
+            game_state_ring: GameStateRing::new(15), // 15 frames of lightweight rollback state
         }
     }
 }

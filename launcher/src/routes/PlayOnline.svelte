@@ -375,6 +375,7 @@
   }
 
   function leaveLobby() {
+    cancelConnection(); // Always reset connection state when leaving
     if (currentRoomId) {
       leaveRoom(currentRoomId, playerId, isHost);
     }
@@ -382,6 +383,16 @@
     currentRoomId = "";
     currentRoom = null;
     isHost = false;
+  }
+
+  /** Cancel an in-progress connection attempt and reset to idle. */
+  async function cancelConnection() {
+    try { await invoke("netplay_stop"); } catch {}
+    try { await invoke("dolphin_mem_detach"); } catch {}
+    stopStatsPolling();
+    connectionState = "idle";
+    netplayStatus = "";
+    localPort = 0;
   }
 
   function copyCode(code: string) {
@@ -467,9 +478,17 @@
         publicAddr: publicAddr,
       });
 
-      // Listen for peer's address
+      // Listen for peer's address (with 30s timeout)
       // onSignals callback receives (signal, fromId) — single signal, not array
+      const signalTimeout = setTimeout(() => {
+        if (connectionState === "connecting") {
+          netplayStatus = "Timed out waiting for peer. Both players must click START MATCH.";
+          // Don't auto-reset — let the user see the message and click CANCEL
+        }
+      }, 30000);
+
       const unsubSignal = onSignals(currentRoomId, playerId, async (signal: any) => {
+        clearTimeout(signalTimeout);
         if (signal.type === "udp_ready" && (signal.publicAddr || signal.port)) {
           // Use peer's public address from STUN, fall back to localhost
           const peerAddr = signal.publicAddr || `127.0.0.1:${signal.port}`;
@@ -737,11 +756,13 @@
             <p class="match-hint">P2P connection will be established automatically</p>
           {:else}
             <div class="connection-status">
-              <div class="spinner"></div>
+              {#if connectionState !== "playing"}<div class="spinner"></div>{/if}
               <span class="status-text">{netplayStatus}</span>
             </div>
             {#if connectionState === "playing"}
               <button class="btn btn-danger" onclick={stopNetplay}>STOP NETPLAY</button>
+            {:else}
+              <button class="btn btn-danger" onclick={cancelConnection} style="margin-top: 8px;">CANCEL</button>
             {/if}
           {/if}
         {/if}
