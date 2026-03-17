@@ -470,19 +470,11 @@
 
   /** Launch Dolphin with GNT4 if it's not already running, then wait for it to be ready. */
   async function ensureDolphinRunning(): Promise<boolean> {
-    // Try attaching first — if it works, Dolphin is already running with a game
-    try {
-      await invoke("dolphin_mem_attach");
-      netplayStatus = "Dolphin already running!";
-      return true;
-    } catch {
-      // Not running or no game loaded — launch it
-    }
-
+    // Always launch Dolphin fresh — kill any stale process first
     netplayStatus = "Launching Dolphin...";
     try {
       await invoke("launch_dolphin", { mode: "netplay", isoOverride: null });
-      netplayStatus = "Dolphin launched! Waiting for game...";
+      netplayStatus = "Dolphin launched! Waiting for game to load...";
     } catch (e: any) {
       netplayStatus = `Failed to launch Dolphin: ${e}`;
       error = `Dolphin launch error: ${e}`;

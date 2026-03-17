@@ -1,5 +1,5 @@
 {
-  "version": "0.2.3",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.3/HowlingWind-v0.2.3.zip",
-  "notes": "v0.2.3 - Restored native title bar, voice chat, rejoin button, GC adapter support"
+  "version": "0.2.4",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.2.4/HowlingWind-v0.2.4.zip",
+  "notes": "v0.2.4 - Fix Dolphin not launching during netplay"
 }
