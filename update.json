@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.0/HowlingWind-v0.3.0.zip",
-  "notes": "v0.3.0 - Fix rollback not starting (memory attach no longer blocks)"
+  "version": "0.3.1",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.1/HowlingWind-v0.3.1.zip",
+  "notes": "v0.3.1 - New flow: connect first, verify, THEN launch game"
 }

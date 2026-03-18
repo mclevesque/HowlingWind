@@ -660,3 +660,112 @@ pub fn netplay_stop(
     ns.session = None;
     Ok(())
 }
+
+/// Run a 5-round sync handshake to verify bidirectional connectivity and measure RTT.
+/// Returns { success: bool, avg_ping_ms: f64, rounds_completed: u32 }
+/// This should be called AFTER netplay_connect, BEFORE launching Dolphin.
+#[tauri::command]
+pub async fn netplay_sync_test(
+    state: tauri::State<'_, Arc<StdMutex<NetplayState>>>,
+) -> Result<serde_json::Value, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const NUM_SYNC_ROUNDS: u32 = 5;
+    const SYNC_TIMEOUT_MS: u64 = 3000;
+
+    // Get raw_send_tx and pong_rx from session
+    let (raw_tx, has_peer) = {
+        let ns = state.lock().map_err(|e| e.to_string())?;
+        let session = ns.session.as_ref().ok_or("No session")?;
+        (session.raw_send_tx.clone(), session.peer_addr.is_some())
+    };
+
+    if !has_peer {
+        return Ok(serde_json::json!({
+            "success": false,
+            "avg_ping_ms": 0.0,
+            "rounds_completed": 0,
+            "error": "No peer connected"
+        }));
+    }
+
+    let raw_tx = raw_tx.ok_or("No raw send channel")?;
+
+    let mut rtts = Vec::new();
+    let mut rounds_ok = 0u32;
+
+    for round in 0..NUM_SYNC_ROUNDS {
+        let now_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        // Send ping
+        let mut ping = [0u8; PING_PACKET_SIZE];
+        ping[0..4].copy_from_slice(&PING_MAGIC.to_le_bytes());
+        ping[4..12].copy_from_slice(&now_us.to_le_bytes());
+        let _ = raw_tx.send(ping.to_vec()).await;
+
+        // Wait for pong with timeout
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_millis(SYNC_TIMEOUT_MS);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                crate::diagnostics::log_warn(&format!("Sync round {} timed out", round + 1));
+                break;
+            }
+
+            // Check for pong
+            {
+                let mut ns = state.lock().map_err(|e| e.to_string())?;
+                if let Some(session) = &mut ns.session {
+                    if let Some(ref mut pong_rx) = session.pong_rx {
+                        if let Ok(sent_ts) = pong_rx.try_recv() {
+                            let reply_us = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_micros() as u64;
+                            let rtt_ms = (reply_us.saturating_sub(sent_ts)) as f64 / 1000.0;
+                            rtts.push(rtt_ms);
+                            rounds_ok += 1;
+                            crate::diagnostics::log_info(&format!(
+                                "Sync round {}/{}: {:.1}ms",
+                                round + 1, NUM_SYNC_ROUNDS, rtt_ms
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    let avg_ping = if rtts.is_empty() {
+        0.0
+    } else {
+        rtts.iter().sum::<f64>() / rtts.len() as f64
+    };
+
+    let success = rounds_ok >= 3; // At least 3 of 5 rounds must succeed
+    let recommended_delay = if avg_ping > 0.0 {
+        ((avg_ping / 16.67 / 2.0).ceil() as u32).max(1).min(7)
+    } else {
+        2
+    };
+
+    crate::diagnostics::log_info(&format!(
+        "Sync test: {}/{} rounds OK, avg {:.1}ms, recommended delay {}f",
+        rounds_ok, NUM_SYNC_ROUNDS, avg_ping, recommended_delay
+    ));
+
+    Ok(serde_json::json!({
+        "success": success,
+        "avg_ping_ms": avg_ping,
+        "rounds_completed": rounds_ok,
+        "recommended_delay": recommended_delay,
+    }))
+}

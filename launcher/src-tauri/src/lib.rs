@@ -1658,6 +1658,7 @@ pub fn run() {
             netplay::netplay_connect,
             netplay::netplay_status,
             netplay::netplay_stop,
+            netplay::netplay_sync_test,
             dolphin_mem::dolphin_mem_attach,
             dolphin_mem::dolphin_mem_read_player,
             dolphin_mem::dolphin_mem_read_frame,

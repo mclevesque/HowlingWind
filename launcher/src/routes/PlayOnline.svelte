@@ -507,101 +507,129 @@
     if (!currentRoom) return;
     error = "";
     connectionState = "connecting";
-    netplayStatus = "Starting netplay session...";
 
     try {
-      // Get settings for input delay / rollback
       const settings: any = await invoke("get_settings");
       const playerIdx = isHost ? 0 : 1; // Host = P1, Guest = P2
 
-      // Auto-launch Dolphin if not running
-      const dolphinReady = await ensureDolphinRunning();
-
-      // Start UDP session
+      // ══════════════════════════════════════════════
+      // STEP 1: Start UDP session (NO Dolphin yet)
+      // ══════════════════════════════════════════════
+      netplayStatus = "Starting UDP session...";
       const port: number = await invoke("netplay_start", {
         playerId: playerIdx,
         inputDelay: settings.input_delay ?? 2,
         maxRollback: settings.max_rollback ?? 7,
-        port: 0, // Let OS assign port
+        port: 0,
       });
       localPort = port;
-      netplayStatus = `UDP bound on port ${port}. Discovering public address...`;
 
-      // Discover our public IP:port via STUN
+      // ══════════════════════════════════════════════
+      // STEP 2: STUN + exchange addresses
+      // ══════════════════════════════════════════════
+      netplayStatus = "Discovering network address...";
       let publicAddr = "";
       try {
         publicAddr = await invoke("stun_discover") as string;
-        netplayStatus = `Public address: ${publicAddr}. Exchanging with peer...`;
       } catch {
-        // STUN failed — fall back to LAN IP for same-network play
         try {
           const lanIp: string = await invoke("get_local_ip");
           publicAddr = `${lanIp}:${port}`;
         } catch {
           publicAddr = `127.0.0.1:${port}`;
         }
-        netplayStatus = `STUN failed, using LAN address ${publicAddr}. Exchanging...`;
       }
+      netplayStatus = `Address: ${publicAddr}. Exchanging with peer...`;
 
-      // Exchange addresses via Firebase signaling
       await sendSignal(currentRoomId, playerId, {
         type: "udp_ready",
         port: port,
         publicAddr: publicAddr,
       });
 
-      // Listen for peer's address (with 30s timeout)
-      // onSignals callback receives (signal, fromId) — single signal, not array
+      // ══════════════════════════════════════════════
+      // STEP 3: Wait for peer's address + connect
+      // ══════════════════════════════════════════════
       const signalTimeout = setTimeout(() => {
         if (connectionState === "connecting") {
-          netplayStatus = "Timed out waiting for peer. Both players must click START MATCH.";
-          // Don't auto-reset — let the user see the message and click CANCEL
+          netplayStatus = "Timed out waiting for peer.";
         }
       }, 30000);
 
       const unsubSignal = onSignals(currentRoomId, playerId, async (signal: any) => {
         clearTimeout(signalTimeout);
         if (signal.type === "udp_ready" && (signal.publicAddr || signal.port)) {
-          // Use peer's public address from STUN, fall back to localhost
           const peerAddr = signal.publicAddr || `127.0.0.1:${signal.port}`;
 
-          netplayStatus = `Hole punching to ${peerAddr}...`;
-
-          // Attempt UDP hole punch
+          netplayStatus = `Connecting to ${peerAddr}...`;
           try {
-            const punched = await invoke("stun_hole_punch", { peerAddress: peerAddr });
-            if (punched) {
-              netplayStatus = `Hole punch succeeded! Connecting...`;
-            } else {
-              netplayStatus = `Hole punch timed out, trying direct connect...`;
-            }
-          } catch {
-            netplayStatus = `Connecting directly to ${peerAddr}...`;
-          }
+            await invoke("stun_hole_punch", { peerAddress: peerAddr });
+          } catch { /* hole punch is best-effort */ }
 
           await invoke("netplay_connect", { peerAddress: peerAddr });
-
-          connectionState = "connected";
-          netplayStatus = "Connected! Starting rollback...";
           playSfx("match_found");
 
-          netplayStatus = "Connected! Starting rollback engine...";
+          // ══════════════════════════════════════════════
+          // STEP 4: Sync handshake (verify connection + measure RTT)
+          // ══════════════════════════════════════════════
+          netplayStatus = "Testing connection...";
+          const syncResult: any = await invoke("netplay_sync_test");
 
-          // Start rollback engine
+          if (!syncResult.success) {
+            netplayStatus = `Connection test failed (${syncResult.rounds_completed}/5 rounds). Try again.`;
+            error = "Connection test failed. Make sure both players are on the same network or have open NAT.";
+            connectionState = "idle";
+            unsubSignal();
+            return;
+          }
+
+          const pingMs = Math.round(syncResult.avg_ping_ms);
+          const recDelay = syncResult.recommended_delay;
+          connectionState = "connected";
+          netplayStatus = `Connected! Ping: ${pingMs}ms (delay: ${recDelay}f)`;
+
+          // ══════════════════════════════════════════════
+          // STEP 5: NOW launch Dolphin (connection is proven)
+          // ══════════════════════════════════════════════
+          netplayStatus = `Ping ${pingMs}ms. Launching game...`;
+          await ensureDolphinRunning();
+
+          // Signal peer that our Dolphin is ready
+          await sendSignal(currentRoomId, playerId, { type: "game_loaded" });
+
+          // Wait for peer's game_loaded signal
+          netplayStatus = "Waiting for opponent's game to load...";
+          await new Promise<void>((resolve) => {
+            const unsub2 = onSignals(currentRoomId, playerId, (sig: any) => {
+              if (sig.type === "game_loaded") {
+                unsub2();
+                resolve();
+              }
+            }, "game_loaded");
+            // Timeout after 60s
+            setTimeout(() => { unsub2(); resolve(); }, 60000);
+          });
+
+          // ══════════════════════════════════════════════
+          // STEP 6: Start rollback engine (both games loaded)
+          // ══════════════════════════════════════════════
+          netplayStatus = "Both games loaded! Starting rollback...";
+
           try {
             await invoke("rollback_start", {
-              inputDelay: settings.input_delay ?? 2,
+              inputDelay: recDelay,
               maxRollback: settings.max_rollback ?? 7,
               localPlayer: playerIdx,
               ranked: ranked,
             });
 
             connectionState = "playing";
-            netplayStatus = "Rollback active!";
+            netplayStatus = `Rollback active! Ping: ${pingMs}ms`;
             playSfx("match_start");
             startStatsPolling();
           } catch (e: any) {
             netplayStatus = `Rollback start failed: ${e}`;
+            error = `${e}`;
           }
 
           unsubSignal();
