@@ -108,6 +108,13 @@ pub async fn run_ipc_game_loop(
     // No memory attachment needed — we read input via IPC GET_INPUT now.
     crate::diagnostics::log_info("Using IPC GET_INPUT for controller reads (no memory attachment needed)");
 
+    // Use RELATIVE frame counter starting from 0.
+    // Both players must count from 0 when rollback starts, regardless of
+    // when their Dolphin was launched. Dolphin's absolute frame number
+    // is meaningless for sync — only the relative count matters.
+    let mut netplay_frame: u32 = 0;
+    let mut first_dolphin_frame: Option<u64> = None;
+
     loop {
         // Check if we should stop
         {
@@ -118,8 +125,8 @@ pub async fn run_ipc_game_loop(
         }
 
         // Wait for next frame boundary from Dolphin
-        let frame = match ipc.wait_frame().await {
-            Ok(f) => f as u32,
+        let dolphin_frame = match ipc.wait_frame().await {
+            Ok(f) => f,
             Err(_) => {
                 if !ipc.is_connected() {
                     crate::diagnostics::log_error("IPC disconnected");
@@ -129,7 +136,16 @@ pub async fn run_ipc_game_loop(
             }
         };
 
-        current_frame = frame;
+        // Convert absolute Dolphin frame to relative netplay frame
+        if first_dolphin_frame.is_none() {
+            first_dolphin_frame = Some(dolphin_frame);
+            crate::diagnostics::log_info(&format!(
+                "[SYNC] First Dolphin frame: {}. Netplay starts at frame 0.",
+                dolphin_frame
+            ));
+        }
+        netplay_frame = (dolphin_frame - first_dolphin_frame.unwrap_or(0)) as u32;
+        current_frame = netplay_frame;
 
         // Verbose debug logging — first 10 frames log everything, then every 60 frames
         let verbose = current_frame <= 10 || current_frame % 60 == 0;
