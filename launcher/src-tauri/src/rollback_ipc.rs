@@ -105,26 +105,8 @@ pub async fn run_ipc_game_loop(
         return;
     }
 
-    // Try to attach to Dolphin's memory for reading local controller input.
-    // We retry until attached — Dolphin needs a moment to start.
-    #[cfg(windows)]
-    fn try_attach_mem(ds: &mut DolphinMemState) -> bool {
-        if ds.memory.is_some() { return true; }
-        match crate::dolphin_mem::find_dolphin_pid() {
-            Ok(pid) => {
-                match crate::dolphin_mem::DolphinMemory::attach(pid) {
-                    Ok(mem) => {
-                        ds.memory = Some(mem);
-                        true
-                    }
-                    Err(_) => false,
-                }
-            }
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(windows))]
-    fn try_attach_mem(_ds: &mut DolphinMemState) -> bool { false }
+    // No memory attachment needed — we read input via IPC GET_INPUT now.
+    crate::diagnostics::log_info("Using IPC GET_INPUT for controller reads (no memory attachment needed)");
 
     loop {
         // Check if we should stop
@@ -133,18 +115,6 @@ pub async fn run_ipc_game_loop(
             if rs.engine.state == EngineState::Idle {
                 break;
             }
-        }
-
-        // Ensure memory is attached (for reading local input)
-        if !mem_attached {
-            let mut ds = dolphin_state.lock().unwrap();
-            mem_attached = try_attach_mem(&mut ds);
-            if !mem_attached {
-                // Can't read input yet — wait and retry
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-            crate::diagnostics::log_info("Memory attached to Dolphin for input reading");
         }
 
         // Wait for next frame boundary from Dolphin
@@ -182,18 +152,24 @@ pub async fn run_ipc_game_loop(
             ));
         }
 
-        // ── Step 1: Read local input from Dolphin memory (port 0 = physical controller) ──
-        let local_input = {
-            let ds = dolphin_state.lock().unwrap();
-            match &ds.memory {
-                Some(mem) => mem.read_pad_input(0).unwrap_or_default(),
-                None => {
-                    mem_attached = false;
-                    GCPadStatus::default()
+        // ── Step 1: Read local input via IPC GET_INPUT (reads physical controller) ──
+        let local_frame_input = match ipc.get_input(0).await {
+            Ok(pad) => FrameInput {
+                buttons: pad.buttons,
+                stick_x: pad.stick_x,
+                stick_y: pad.stick_y,
+                cstick_x: pad.cstick_x,
+                cstick_y: pad.cstick_y,
+                trigger_l: pad.trigger_l,
+                trigger_r: pad.trigger_r,
+            },
+            Err(e) => {
+                if verbose {
+                    crate::diagnostics::log_warn(&format!("[INPUT] GET_INPUT failed: {}", e));
                 }
+                FrameInput::default()
             }
         };
-        let local_frame_input = pad_to_frame_input(&local_input);
 
         // ── Step 2: Send local input to remote via UDP ──
         {
@@ -341,16 +317,19 @@ pub async fn run_ipc_game_loop(
 
                 if verbose {
                     crate::diagnostics::log_info(&format!(
-                        "[INJECT] F{} remote_btns=0x{:04X} predicted={} → port {}",
-                        current_frame, remote_input.buttons,
-                        is_predicted, remote_player
+                        "[INJECT] F{} remote_btns=0x{:04X} predicted={} → port 1 (remote always port 1)",
+                        current_frame, remote_input.buttons, is_predicted
                     ));
                 }
 
-                // Only inject the REMOTE player's input
-                let remote_port = remote_player as u32;
-                if let Err(e) = ipc.set_input(remote_port, &remote_pad).await {
-                    crate::diagnostics::log_error(&format!("[INJECT] set_input({}) failed: {}", remote_port, e));
+                // Only inject the REMOTE player's input into port 1.
+                // Port 0 = physical controller (local player, always).
+                // Port 1 = remote player's input (injected via IPC).
+                // Both players see themselves as P1 (port 0) on their own screen.
+                if let Err(e) = ipc.set_input(1, &remote_pad).await {
+                    if verbose {
+                        crate::diagnostics::log_error(&format!("[INJECT] set_input(1) failed: {}", e));
+                    }
                 }
 
                 // Track prediction stats

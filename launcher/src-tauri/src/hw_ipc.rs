@@ -326,6 +326,30 @@ impl HWClient {
         }
     }
 
+    /// Read physical controller input directly from Dolphin (bypasses IPC override).
+    pub async fn get_input(&self, port: u32) -> Result<HWPadInput, String> {
+        let cmd = format!("GET_INPUT {}", port);
+        match self.send_command(&cmd).await? {
+            HWResponse::Ok { args, .. } => {
+                // Parse: "<port> 0xBBBB <sx> <sy> <cx> <cy> <tl> <tr>"
+                let parts: Vec<&str> = args.split_whitespace().collect();
+                if parts.len() < 8 {
+                    return Err(format!("Invalid GET_INPUT response: {}", args));
+                }
+                let buttons = u16::from_str_radix(parts[1].trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0);
+                let stick_x = parts[2].parse::<i8>().unwrap_or(0);
+                let stick_y = parts[3].parse::<i8>().unwrap_or(0);
+                let cstick_x = parts[4].parse::<i8>().unwrap_or(0);
+                let cstick_y = parts[5].parse::<i8>().unwrap_or(0);
+                let trigger_l = parts[6].parse::<u8>().unwrap_or(0);
+                let trigger_r = parts[7].parse::<u8>().unwrap_or(0);
+                Ok(HWPadInput { buttons, stick_x, stick_y, cstick_x, cstick_y, trigger_l, trigger_r })
+            }
+            HWResponse::Error { reason, .. } => Err(reason),
+            other => Err(format!("Unexpected: {:?}", other)),
+        }
+    }
+
     /// Clear input override for a port, returning to physical controller.
     pub async fn clear_input(&self, port: u32) -> Result<(), String> {
         match self.send_command(&format!("CLEAR_INPUT {}", port)).await? {
