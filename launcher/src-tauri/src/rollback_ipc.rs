@@ -338,13 +338,30 @@ pub async fn run_ipc_game_loop(
                     ));
                 }
 
-                // Only inject the REMOTE player's input into port 1.
-                // Port 0 = physical controller (local player, always).
-                // Port 1 = remote player's input (injected via IPC).
-                // Both players see themselves as P1 (port 0) on their own screen.
+                // Inject remote into port 1 (for VS gameplay as P2)
                 if let Err(e) = ipc.set_input(1, &remote_pad).await {
                     if verbose {
                         crate::diagnostics::log_error(&format!("[INJECT] set_input(1) failed: {}", e));
+                    }
+                }
+
+                // ALSO merge remote input into port 0 (for menu control).
+                // Both players can control menus. During VS character select,
+                // the game splits port 0 = P1 wheel, port 1 = P2 wheel naturally.
+                // Read local physical input, OR remote buttons in, merge sticks.
+                let local_pad = ipc.get_input(0).await.unwrap_or_default();
+                let merged = HWPadInput {
+                    buttons: local_pad.buttons | remote_input.buttons,
+                    stick_x: if remote_input.stick_x.abs() > local_pad.stick_x.abs() { remote_input.stick_x } else { local_pad.stick_x },
+                    stick_y: if remote_input.stick_y.abs() > local_pad.stick_y.abs() { remote_input.stick_y } else { local_pad.stick_y },
+                    cstick_x: if remote_input.cstick_x.abs() > local_pad.cstick_x.abs() { remote_input.cstick_x } else { local_pad.cstick_x },
+                    cstick_y: if remote_input.cstick_y.abs() > local_pad.cstick_y.abs() { remote_input.cstick_y } else { local_pad.cstick_y },
+                    trigger_l: remote_input.trigger_l.max(local_pad.trigger_l),
+                    trigger_r: remote_input.trigger_r.max(local_pad.trigger_r),
+                };
+                if let Err(e) = ipc.set_input(0, &merged).await {
+                    if verbose {
+                        crate::diagnostics::log_error(&format!("[INJECT] merged set_input(0) failed: {}", e));
                     }
                 }
 
