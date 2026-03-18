@@ -80,12 +80,30 @@ pub async fn run_ipc_game_loop(
         config.input_delay, config.max_rollback
     ));
 
-    // Verify IPC connection
-    if let Err(e) = ipc.ping().await {
-        crate::diagnostics::log_error(&format!("IPC ping failed: {}", e));
+    // Verify IPC connection — retry up to 5 times, draining any stale WELCOME messages
+    let mut ipc_verified = false;
+    for attempt in 0..5 {
+        // Drain any stale messages (WELCOME, etc.) before sending PING
+        ipc.drain_stale().await;
+
+        match ipc.ping().await {
+            Ok(()) => {
+                ipc_verified = true;
+                crate::diagnostics::log_ipc("IPC connection verified");
+                break;
+            }
+            Err(e) => {
+                crate::diagnostics::log_warn(&format!(
+                    "IPC ping attempt {}/5 failed: {} — retrying...", attempt + 1, e
+                ));
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+    if !ipc_verified {
+        crate::diagnostics::log_error("IPC connection failed after 5 attempts — aborting");
         return;
     }
-    crate::diagnostics::log_ipc("IPC connection verified");
 
     // Try to attach to Dolphin's memory for reading local controller input.
     // We retry until attached — Dolphin needs a moment to start.
@@ -143,16 +161,24 @@ pub async fn run_ipc_game_loop(
 
         current_frame = frame;
 
-        // Debug logging
-        if current_frame <= 5 || current_frame % 120 == 0 {
+        // Verbose debug logging — first 10 frames log everything, then every 60 frames
+        let verbose = current_frame <= 10 || current_frame % 60 == 0;
+        if verbose {
             let np = netplay_state.lock().unwrap();
-            let remote_count = np.session.as_ref()
-                .map(|s| s.input_buffer.remote.len()).unwrap_or(0);
-            let has_peer = np.session.as_ref()
-                .map(|s| s.peer_addr.is_some()).unwrap_or(false);
+            let (remote_count, local_count, has_peer, peer_addr, ping_ms) = match np.session.as_ref() {
+                Some(s) => (
+                    s.input_buffer.remote.len(),
+                    s.input_buffer.local.len(),
+                    s.peer_addr.is_some(),
+                    s.peer_addr.map(|a| a.to_string()).unwrap_or("none".into()),
+                    s.ping_ms,
+                ),
+                None => (0, 0, false, "NO_SESSION".into(), 0.0),
+            };
             crate::diagnostics::log_info(&format!(
-                "F{} P{} peer={} remote_inputs={}",
-                current_frame, local_player + 1, has_peer, remote_count
+                "[FRAME] F{} P{} peer={} addr={} ping={:.1}ms local_buf={} remote_buf={}",
+                current_frame, local_player + 1, has_peer, peer_addr, ping_ms,
+                local_count, remote_count
             ));
         }
 
@@ -184,7 +210,30 @@ pub async fn run_ipc_game_loop(
                     checksum: 0,
                 };
                 if let Some(ref tx) = session.send_tx {
-                    let _ = tx.try_send(packet);
+                    match tx.try_send(packet) {
+                        Ok(()) => {
+                            if verbose {
+                                crate::diagnostics::log_info(&format!(
+                                    "[SEND] F{} buttons=0x{:04X} stick=({},{})",
+                                    current_frame, local_frame_input.buttons,
+                                    local_frame_input.stick_x, local_frame_input.stick_y
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            crate::diagnostics::log_warn(&format!(
+                                "[SEND] F{} FAILED: {}", current_frame, e
+                            ));
+                        }
+                    }
+                } else {
+                    if verbose {
+                        crate::diagnostics::log_warn(&format!("[SEND] F{} NO send_tx channel!", current_frame));
+                    }
+                }
+            } else {
+                if verbose {
+                    crate::diagnostics::log_warn(&format!("[SEND] F{} NO netplay session!", current_frame));
                 }
             }
         }
@@ -193,7 +242,18 @@ pub async fn run_ipc_game_loop(
         let rollback_frames = {
             let mut np = netplay_state.lock().unwrap();
             match &mut np.session {
-                Some(session) => session.process_received(),
+                Some(session) => {
+                    let frames = session.process_received();
+                    if verbose {
+                        let remote_count = session.input_buffer.remote.len();
+                        crate::diagnostics::log_info(&format!(
+                            "[RECV] F{} processed, remote_buf={}, rollback_needed={}",
+                            current_frame, remote_count,
+                            if frames.is_empty() { "no".to_string() } else { format!("yes({})", frames.len()) }
+                        ));
+                    }
+                    frames
+                }
                 None => vec![],
             }
         };
@@ -274,15 +334,31 @@ pub async fn run_ipc_game_loop(
                 let remote_pad = frame_input_to_pad(&remote_input);
                 let local_pad = frame_input_to_pad(&local_frame_input);
 
+                if verbose {
+                    crate::diagnostics::log_info(&format!(
+                        "[INJECT] F{} local_btns=0x{:04X} remote_btns=0x{:04X} predicted={} P{}=local P{}=remote",
+                        current_frame, local_frame_input.buttons, remote_input.buttons,
+                        is_predicted, local_player + 1, remote_player + 1
+                    ));
+                }
+
                 if local_player == 0 {
                     // HOST: local = P1 (port 0), remote = P2 (port 1)
-                    let _ = ipc.set_input(0, &local_pad).await;
-                    let _ = ipc.set_input(1, &remote_pad).await;
+                    if let Err(e) = ipc.set_input(0, &local_pad).await {
+                        crate::diagnostics::log_error(&format!("[INJECT] set_input(0) failed: {}", e));
+                    }
+                    if let Err(e) = ipc.set_input(1, &remote_pad).await {
+                        crate::diagnostics::log_error(&format!("[INJECT] set_input(1) failed: {}", e));
+                    }
                 } else {
                     // GUEST: remote = P1 (port 0), local = P2 (port 1)
                     // This BLOCKS the physical controller from controlling P1!
-                    let _ = ipc.set_input(0, &remote_pad).await;
-                    let _ = ipc.set_input(1, &local_pad).await;
+                    if let Err(e) = ipc.set_input(0, &remote_pad).await {
+                        crate::diagnostics::log_error(&format!("[INJECT] set_input(0) failed: {}", e));
+                    }
+                    if let Err(e) = ipc.set_input(1, &local_pad).await {
+                        crate::diagnostics::log_error(&format!("[INJECT] set_input(1) failed: {}", e));
+                    }
                 }
 
                 // Track prediction stats

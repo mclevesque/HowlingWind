@@ -1568,8 +1568,7 @@ fn launch_dolphin(
         { ds.embedded_hwnd = None; }
     }
 
-    // Ensure Dolphin runs in portable mode (reads config from its own User/ folder)
-    // AND copy controller config from AppData if portable config has keyboard defaults
+    // Ensure portable.txt exists so Dolphin reads Gecko codes from its own User/ folder
     {
         let dolphin = PathBuf::from(&settings.dolphin_path);
         if let Some(dir) = dolphin.parent() {
@@ -1579,28 +1578,60 @@ fn launch_dolphin(
                 diagnostics::log_info("Created portable.txt for Dolphin fork");
             }
 
-            // Copy controller config from AppData → portable if portable has keyboard defaults
+            // Copy controller config from AppData → portable if portable has only keyboard
             let portable_gcpad = dir.join("User").join("Config").join("GCPadNew.ini");
             let appdata = std::env::var("APPDATA").unwrap_or_default();
             let appdata_gcpad = PathBuf::from(&appdata).join("Dolphin Emulator").join("Config").join("GCPadNew.ini");
 
-            let portable_has_real_controller = if portable_gcpad.exists() {
-                let content = fs::read_to_string(&portable_gcpad).unwrap_or_default();
-                content.contains("SDL") || content.contains("XInput") || content.contains("GameCube Adapter")
+            // Check if portable has a real controller configured
+            let portable_has_real = if portable_gcpad.exists() {
+                let c = fs::read_to_string(&portable_gcpad).unwrap_or_default();
+                c.contains("SDL") || c.contains("XInput") || c.contains("GameCube Adapter")
             } else {
                 false
             };
 
-            if !portable_has_real_controller {
-                // Try to copy from AppData (user's existing Dolphin config)
+            if !portable_has_real {
+                // If AppData has a real controller config, copy it over
                 if appdata_gcpad.exists() {
-                    let content = fs::read_to_string(&appdata_gcpad).unwrap_or_default();
-                    if content.contains("SDL") || content.contains("XInput") {
+                    let c = fs::read_to_string(&appdata_gcpad).unwrap_or_default();
+                    if c.contains("SDL") || c.contains("XInput") || c.contains("GameCube Adapter") {
                         if let Some(parent) = portable_gcpad.parent() {
                             let _ = fs::create_dir_all(parent);
                         }
-                        let _ = fs::write(&portable_gcpad, &content);
-                        diagnostics::log_info("Copied controller config from AppData to portable");
+                        let _ = fs::write(&portable_gcpad, &c);
+                        diagnostics::log_info("Copied controller config from AppData → portable");
+                    }
+                }
+                // If AppData also doesn't have real config, ensure_gcpad_config will auto-detect
+            }
+
+            // Also copy Dolphin.ini from AppData if portable doesn't have full config
+            let portable_dolphin_ini = dir.join("User").join("Config").join("Dolphin.ini");
+            let appdata_dolphin_ini = PathBuf::from(&appdata).join("Dolphin Emulator").join("Config").join("Dolphin.ini");
+            if appdata_dolphin_ini.exists() {
+                let appdata_content = fs::read_to_string(&appdata_dolphin_ini).unwrap_or_default();
+                // Copy SIDevice settings (controller type: 6=GC Adapter, 12=Standard)
+                if appdata_content.contains("SIDevice") {
+                    if portable_dolphin_ini.exists() {
+                        let mut portable_content = fs::read_to_string(&portable_dolphin_ini).unwrap_or_default();
+                        // Extract SIDevice lines from AppData and merge
+                        for line in appdata_content.lines() {
+                            let trimmed = line.trim();
+                            if trimmed.starts_with("SIDevice") {
+                                // Replace in portable if exists, or append to [Core]
+                                if let Some(key) = trimmed.split('=').next() {
+                                    let key = key.trim();
+                                    if let Some(pos) = portable_content.find(key) {
+                                        // Find end of line
+                                        let end = portable_content[pos..].find('\n').map(|i| pos + i + 1).unwrap_or(portable_content.len());
+                                        portable_content.replace_range(pos..end, &format!("{}\n", trimmed));
+                                    }
+                                }
+                            }
+                        }
+                        let _ = fs::write(&portable_dolphin_ini, &portable_content);
+                        diagnostics::log_info("Merged SIDevice settings from AppData → portable");
                     }
                 }
             }
@@ -1832,6 +1863,8 @@ pub fn run() {
             netplay::netplay_status,
             netplay::netplay_stop,
             netplay::netplay_sync_test,
+            netplay::netplay_poll_remote_input,
+            netplay::netplay_send_test_input,
             dolphin_mem::dolphin_mem_attach,
             dolphin_mem::dolphin_mem_read_player,
             dolphin_mem::dolphin_mem_read_frame,

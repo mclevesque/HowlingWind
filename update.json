@@ -1,5 +1,5 @@
 {
-  "version": "0.3.6",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.6/HowlingWind-v0.3.6.zip",
-  "notes": "v0.3.6 - Try Fix IPC runtime death, LAN-first, intro skip"
+  "version": "0.3.7",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.7/HowlingWind-v0.3.7.zip",
+  "notes": "v0.3.7 - Try Fix IPC runtime death, LAN-first, intro skip"
 }

@@ -459,14 +459,31 @@ impl NetplaySession {
     /// Process received packets. Returns frames that need rollback (if any).
     pub fn process_received(&mut self) -> Vec<u32> {
         let mut rollback_frames = Vec::new();
+        let mut received_count = 0u32;
 
         if let Some(ref mut rx) = self.recv_rx {
             while let Ok(packet) = rx.try_recv() {
+                received_count += 1;
                 let mismatch = self.input_buffer.add_remote(packet.frame, packet.input);
                 if mismatch {
                     rollback_frames.push(packet.frame);
                 }
+                // Log first 10 received packets for debugging
+                if self.input_buffer.remote.len() <= 10 {
+                    crate::diagnostics::log_info(&format!(
+                        "[UDP_RECV] frame={} player={} btns=0x{:04X} mismatch={} total_remote={}",
+                        packet.frame, packet.player_id, packet.input.buttons,
+                        mismatch, self.input_buffer.remote.len()
+                    ));
+                }
             }
+        }
+
+        if received_count > 0 && self.input_buffer.remote.len() <= 20 {
+            crate::diagnostics::log_info(&format!(
+                "[UDP_RECV] batch: {} packets, {} rollback triggers",
+                received_count, rollback_frames.len()
+            ));
         }
 
         rollback_frames.sort();
@@ -768,4 +785,70 @@ pub async fn netplay_sync_test(
         "rounds_completed": rounds_ok,
         "recommended_delay": recommended_delay,
     }))
+}
+
+/// Read what the remote player is pressing right now (from the UDP input channel).
+/// Also sends our local controller state so the remote can see ours.
+/// Used for the pre-game controller test.
+#[tauri::command]
+pub fn netplay_poll_remote_input(
+    state: tauri::State<'_, Arc<StdMutex<NetplayState>>>,
+) -> Result<serde_json::Value, String> {
+    let mut ns = state.lock().map_err(|e| e.to_string())?;
+    let session = ns.session.as_mut().ok_or("No session")?;
+
+    // Read any incoming input packets
+    let mut remote_buttons: u16 = 0;
+    let mut remote_stick_x: i8 = 0;
+    let mut remote_stick_y: i8 = 0;
+    let mut got_remote = false;
+
+    if let Some(ref mut rx) = session.recv_rx {
+        while let Ok(packet) = rx.try_recv() {
+            remote_buttons = packet.input.buttons;
+            remote_stick_x = packet.input.stick_x;
+            remote_stick_y = packet.input.stick_y;
+            got_remote = true;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "got_remote": got_remote,
+        "buttons": remote_buttons,
+        "stick_x": remote_stick_x,
+        "stick_y": remote_stick_y,
+    }))
+}
+
+/// Send our current controller state to the remote player for the input test.
+#[tauri::command]
+pub async fn netplay_send_test_input(
+    buttons: u16,
+    stick_x: i8,
+    stick_y: i8,
+    state: tauri::State<'_, Arc<StdMutex<NetplayState>>>,
+) -> Result<(), String> {
+    let ns = state.lock().map_err(|e| e.to_string())?;
+    let session = ns.session.as_ref().ok_or("No session")?;
+
+    let packet = InputPacket {
+        frame: 99999, // Special frame number = test mode
+        player_id: session.local_player_id,
+        input: FrameInput {
+            buttons,
+            stick_x,
+            stick_y,
+            cstick_x: 0,
+            cstick_y: 0,
+            trigger_l: 0,
+            trigger_r: 0,
+        },
+        checksum: 0,
+    };
+
+    if let Some(ref tx) = session.send_tx {
+        tx.try_send(packet).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }

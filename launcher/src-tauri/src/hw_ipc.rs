@@ -198,13 +198,34 @@ impl HWClient {
             current_frame,
         };
 
-        // Drain the welcome message ("HOWLINGWIND 1.0") so it doesn't
-        // get confused with a real command response later
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        // Wait for and consume the WELCOME message from the server.
+        // This MUST be drained before any commands are sent, otherwise
+        // the first command (e.g. PING) will get the WELCOME as its response.
         {
             let mut rx = client.resp_rx.lock().await;
-            while let Ok(_) = rx.try_recv() {
-                // Discard stale welcome/init messages
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            loop {
+                match tokio::time::timeout(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    rx.recv(),
+                ).await {
+                    Ok(Some(HWResponse::Ok { command, .. })) if command == "WELCOME" => {
+                        eprintln!("[hw_ipc] Welcome message consumed");
+                        break;
+                    }
+                    Ok(Some(_other)) => {
+                        // Some other message arrived first — discard and keep waiting
+                        continue;
+                    }
+                    Ok(None) => {
+                        eprintln!("[hw_ipc] Channel closed before welcome");
+                        break;
+                    }
+                    Err(_) => {
+                        eprintln!("[hw_ipc] Timeout waiting for welcome (5s) — proceeding anyway");
+                        break;
+                    }
+                }
             }
         }
 
@@ -213,6 +234,15 @@ impl HWClient {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Drain any stale messages from the response channel (WELCOME, etc.)
+    /// Call this before sending the first command on a new runtime.
+    pub async fn drain_stale(&self) {
+        let mut rx = self.resp_rx.lock().await;
+        while let Ok(msg) = rx.try_recv() {
+            eprintln!("[hw_ipc] Drained stale message: {:?}", msg);
+        }
     }
 
     pub fn current_frame(&self) -> u64 {

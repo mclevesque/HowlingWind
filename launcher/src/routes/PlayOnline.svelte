@@ -604,30 +604,55 @@
           playSfx("match_found");
 
           // ══════════════════════════════════════════════
-          // STEP 4: Measure final RTT
+          // STEP 4: Measure RTT + Controller Input Test
           // ══════════════════════════════════════════════
           const syncResult: any = await invoke("netplay_sync_test");
-
           const pingMs = Math.round(syncResult.avg_ping_ms);
           const recDelay = syncResult.recommended_delay;
           connectionState = "connected";
-          netplayStatus = `Connected! Ping: ${pingMs}ms (delay: ${recDelay}f)`;
 
-          // ══════════════════════════════════════════════
-          // STEP 5: NOW launch Dolphin (connection is proven)
-          // ══════════════════════════════════════════════
-          netplayStatus = `Ping ${pingMs}ms. Launching game...`;
+          // ── CONTROLLER TEST: 5 seconds of input exchange ──
+          netplayStatus = `Ping ${pingMs}ms — CONTROLLER TEST: Press buttons! (5s)`;
+          let testFrames = 0;
+          let remoteButtonsEverSeen = false;
+          const testStart = Date.now();
 
-          // GUEST: Swap controller from Port 1 → Port 2 before launching Dolphin
-          if (!isHost) {
-            try {
-              await invoke("swap_controller_to_port2");
-              netplayStatus = "Controller set to P2. Launching game...";
-            } catch (e: any) {
-              console.warn("Controller swap failed:", e);
+          while (Date.now() - testStart < 5000) {
+            // Send a test input (just buttons=1 as a heartbeat)
+            await invoke("netplay_send_test_input", {
+              buttons: 1, stickX: 0, stickY: 0,
+            });
+
+            // Poll for remote input
+            const remote: any = await invoke("netplay_poll_remote_input");
+            if (remote.got_remote) {
+              remoteButtonsEverSeen = true;
+              const btns = remote.buttons;
+              const btnNames: string[] = [];
+              if (btns & 0x0100) btnNames.push("A");
+              if (btns & 0x0200) btnNames.push("B");
+              if (btns & 0x0400) btnNames.push("X");
+              if (btns & 0x0800) btnNames.push("Y");
+              if (btns & 0x1000) btnNames.push("START");
+              if (btns & 0x0010) btnNames.push("UP");
+              if (btns & 0x0020) btnNames.push("DOWN");
+              if (btns & 0x0040) btnNames.push("LEFT");
+              if (btns & 0x0080) btnNames.push("RIGHT");
+              netplayStatus = `Ping ${pingMs}ms — Remote pressing: [${btnNames.join(" ")}] (${Math.ceil((5000 - (Date.now() - testStart)) / 1000)}s)`;
+            } else {
+              netplayStatus = `Ping ${pingMs}ms — Waiting for remote input... (${Math.ceil((5000 - (Date.now() - testStart)) / 1000)}s)`;
             }
+            testFrames++;
+            await new Promise(r => setTimeout(r, 50));
           }
 
+          netplayStatus = remoteButtonsEverSeen
+            ? `Controller test PASSED! Launching game...`
+            : `No remote input received. Launching anyway...`;
+
+          // ══════════════════════════════════════════════
+          // STEP 5: Launch Dolphin (connection is proven)
+          // ══════════════════════════════════════════════
           await ensureDolphinRunning();
 
           // Signal peer that our Dolphin is ready
@@ -642,7 +667,6 @@
                 resolve();
               }
             }, "game_loaded");
-            // Timeout after 60s
             setTimeout(() => { unsub2(); resolve(); }, 60000);
           });
 
@@ -756,10 +780,7 @@
       await invoke("rollback_stop");
       await invoke("netplay_stop");
       await invoke("dolphin_mem_detach");
-      // Restore guest's controller back to Port 1
-      if (!isHost) {
-        await invoke("restore_controller_to_port1");
-      }
+      // Port swap handled by IPC — no config restore needed
     } catch {}
     connectionState = "idle";
     netplayStatus = "";
