@@ -262,7 +262,7 @@ impl HWClient {
         // Wait for next non-event response
         let mut rx = self.resp_rx.lock().await;
         match tokio::time::timeout(
-            tokio::time::Duration::from_millis(2000),
+            tokio::time::Duration::from_millis(10000),
             rx.recv(),
         ).await {
             Ok(Some(resp)) => Ok(resp),

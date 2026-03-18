@@ -374,15 +374,11 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 6: Save state for this frame ──
-        let save_start = Instant::now();
-        let slot = slot_for_frame(current_frame);
-        if let Err(e) = ipc.save_state(slot).await {
-            if current_frame <= 5 {
-                crate::diagnostics::log_error(&format!("Save state failed F{}: {}", current_frame, e));
-            }
-        }
-        let save_ms = save_start.elapsed().as_secs_f64() * 1000.0;
+        // ── Step 6: Save state (DISABLED — too slow, kills IPC connection) ──
+        // TODO: Re-enable once we implement in-memory save states in the fork
+        // The current State::Save() writes to disk, takes 2+ seconds, and
+        // causes the IPC response timeout to kill the connection.
+        let save_ms = 0.0;
 
         // ── Step 7: Update stats + ping ──
         {

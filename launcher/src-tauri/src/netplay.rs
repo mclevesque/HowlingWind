@@ -463,6 +463,10 @@ impl NetplaySession {
 
         if let Some(ref mut rx) = self.recv_rx {
             while let Ok(packet) = rx.try_recv() {
+                // Skip test packets from controller test phase
+                if packet.frame >= 90000 {
+                    continue;
+                }
                 received_count += 1;
                 let mismatch = self.input_buffer.add_remote(packet.frame, packet.input);
                 if mismatch {
