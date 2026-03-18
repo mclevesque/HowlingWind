@@ -108,6 +108,9 @@ pub async fn run_ipc_game_loop(
     // No memory attachment needed — we read input via IPC GET_INPUT now.
     crate::diagnostics::log_info("Using IPC GET_INPUT for controller reads (no memory attachment needed)");
 
+    // Track the last remote input received (persists between frames)
+    let mut last_remote_input = FrameInput::default();
+
     // Use RELATIVE frame counter starting from 0.
     // Both players must count from 0 when rollback starts, regardless of
     // when their Dolphin was launched. Dolphin's absolute frame number
@@ -268,111 +271,43 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 3: Process received remote inputs ──
-        let rollback_frames = {
-            let mut np = netplay_state.lock().unwrap();
-            match &mut np.session {
-                Some(session) => {
-                    let frames = session.process_received();
-                    if verbose {
-                        let remote_count = session.input_buffer.remote.len();
-                        crate::diagnostics::log_info(&format!(
-                            "[RECV] F{} processed, remote_buf={}, rollback_needed={}",
-                            current_frame, remote_count,
-                            if frames.is_empty() { "no".to_string() } else { format!("yes({})", frames.len()) }
-                        ));
-                    }
-                    frames
-                }
-                None => vec![],
-            }
-        };
+        // ── Step 3: (Skipped — we read directly from recv_rx in Step 5 now) ──
 
-        // ── Step 4: Handle rollback if needed ──
-        if !rollback_frames.is_empty() {
-            let earliest = rollback_frames[0];
-            let depth = current_frame.saturating_sub(earliest);
+        // ── Step 4: Rollback disabled (save states not implemented yet) ──
 
-            if depth > 0 && depth <= config.max_rollback {
-                let rb_start = Instant::now();
-
-                let rollback_slot = slot_for_frame(earliest);
-                if let Err(e) = ipc.load_state(rollback_slot).await {
-                    crate::diagnostics::log_error(&format!("Rollback load_state failed: {}", e));
-                } else {
-                    let _ = ipc.pause().await;
-
-                    // Collect inputs (brief lock)
-                    let replay_inputs: Vec<(HWPadInput, HWPadInput)> = {
-                        let np = netplay_state.lock().unwrap();
-                        if let Some(session) = &np.session {
-                            (earliest..current_frame).map(|f| {
-                                let local = session.input_buffer.local.get(&f);
-                                let remote = session.input_buffer.remote.get(&f);
-                                let local_pad = local.map(|i| frame_input_to_pad(i)).unwrap_or_default();
-                                let remote_pad = remote.map(|i| frame_input_to_pad(i)).unwrap_or_default();
-                                // P1 = port 0, P2 = port 1
-                                if local_player == 0 {
-                                    (local_pad, remote_pad) // Host: local=P1, remote=P2
-                                } else {
-                                    (remote_pad, local_pad) // Guest: remote=P1, local=P2
-                                }
-                            }).collect()
-                        } else {
-                            vec![]
-                        }
-                    };
-
-                    // Replay frames with correct inputs
-                    for (p1_pad, p2_pad) in &replay_inputs {
-                        let _ = ipc.set_input(0, p1_pad).await;
-                        let _ = ipc.set_input(1, p2_pad).await;
-                        let _ = ipc.frame_advance().await;
-                    }
-
-                    let _ = ipc.clear_input(0).await;
-                    let _ = ipc.clear_input(1).await;
-                    let _ = ipc.resume().await;
-
-                    let rb_ms = rb_start.elapsed().as_secs_f64() * 1000.0;
-                    crate::diagnostics::log_rollback(earliest, current_frame, rb_ms);
-
-                    let mut rs = rb_state.lock().unwrap();
-                    rs.engine.stats.rollback_count += 1;
-                    rs.engine.stats.total_rollback_frames += depth as u64;
-                    rs.engine.stats.last_rollback_depth = depth;
-                    if rb_ms > rs.engine.stats.max_rollback_ms {
-                        rs.engine.stats.max_rollback_ms = rb_ms;
-                    }
-                    rs.engine.total_rollback_time += rb_start.elapsed();
-                    if rs.engine.stats.rollback_count > 0 {
-                        rs.engine.stats.avg_rollback_ms = rs.engine.total_rollback_time.as_secs_f64()
-                            * 1000.0 / rs.engine.stats.rollback_count as f64;
-                    }
-                }
-            }
-        }
-
-        // ── Step 5: Inject ONLY the remote player's input via IPC ──
-        // DO NOT override the local player's port — let the physical controller
-        // drive it naturally. Overriding it creates a feedback loop (we read back
-        // our own injected zeros from memory, killing the controller).
-        //
-        // HOST (P1): physical controller → port 0 naturally. Inject remote → port 1.
-        // GUEST (P2): physical controller → port 0 naturally (controls P1 on their screen).
-        //             Inject remote → port 1 (host appears as P2 on guest's screen).
-        //             NOTE: Guest sees themselves as P1 locally — player assignment
-        //             is handled by which side's input goes where over the network.
+        // ── Step 5: Inject the LATEST remote input, ignoring frame numbers ──
+        // Don't match by frame — just use whatever the remote player last sent.
+        // Frame matching is only needed for rollback replay (which is disabled).
+        // This guarantees any input that arrives gets injected immediately.
         {
             let mut np = netplay_state.lock().unwrap();
             if let Some(session) = &mut np.session {
-                let (remote_input, is_predicted) = session.input_buffer.get_remote(current_frame);
+                // Drain ALL received packets and keep the LATEST one
+                let mut latest_remote = FrameInput::default();
+                let mut got_any = false;
+                if let Some(ref mut rx) = session.recv_rx {
+                    while let Ok(packet) = rx.try_recv() {
+                        if packet.frame < 90000 { // skip test packets
+                            latest_remote = packet.input;
+                            got_any = true;
+                        }
+                    }
+                }
+
+                // If we got new data, use it. Otherwise repeat the last known input.
+                let remote_input = if got_any {
+                    last_remote_input = latest_remote;
+                    latest_remote
+                } else {
+                    last_remote_input
+                };
+
                 let remote_pad = frame_input_to_pad(&remote_input);
 
                 if verbose {
                     crate::diagnostics::log_info(&format!(
-                        "[INJECT] F{} remote_btns=0x{:04X} predicted={} → port 1 (remote always port 1)",
-                        current_frame, remote_input.buttons, is_predicted
+                        "[INJECT] F{} remote_btns=0x{:04X} new_data={} → port 0+1",
+                        current_frame, remote_input.buttons, got_any
                     ));
                 }
 
@@ -403,15 +338,11 @@ pub async fn run_ipc_game_loop(
                     }
                 }
 
-                // Track prediction stats
+                // Track stats
                 let mut rs = rb_state.lock().unwrap();
                 rs.engine.predictions_total += 1;
-                if !is_predicted {
+                if got_any {
                     rs.engine.predictions_correct += 1;
-                }
-                if rs.engine.predictions_total > 0 {
-                    rs.engine.stats.prediction_success_rate =
-                        (rs.engine.predictions_correct as f64 / rs.engine.predictions_total as f64) * 100.0;
                 }
             }
         }

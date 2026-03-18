@@ -266,7 +266,7 @@ pub struct NetplaySession {
     pub current_frame: u32,
     pub socket: Option<Arc<UdpSocket>>,
     pub send_tx: Option<mpsc::Sender<InputPacket>>,
-    recv_rx: Option<mpsc::Receiver<InputPacket>>,
+    pub recv_rx: Option<mpsc::Receiver<InputPacket>>,
     pub sync_send_tx: Option<mpsc::Sender<SyncPacket>>,
     pub sync_rx: Option<mpsc::Receiver<SyncPacket>>,
     pub desync_info: Option<(u32, u32, u32)>,
