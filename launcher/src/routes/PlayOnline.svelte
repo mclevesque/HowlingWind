@@ -525,26 +525,35 @@
       localPort = port;
 
       // ══════════════════════════════════════════════
-      // STEP 2: STUN + exchange addresses
+      // STEP 2: Get BOTH LAN and STUN addresses
       // ══════════════════════════════════════════════
       netplayStatus = "Discovering network address...";
       let publicAddr = "";
+      let lanAddr = "";
+
+      // Always get LAN address
+      try {
+        const lanIp: string = await invoke("get_local_ip");
+        lanAddr = `${lanIp}:${port}`;
+      } catch {
+        lanAddr = `127.0.0.1:${port}`;
+      }
+
+      // Try STUN for external address
       try {
         publicAddr = await invoke("stun_discover") as string;
       } catch {
-        try {
-          const lanIp: string = await invoke("get_local_ip");
-          publicAddr = `${lanIp}:${port}`;
-        } catch {
-          publicAddr = `127.0.0.1:${port}`;
-        }
+        publicAddr = lanAddr; // Fall back to LAN
       }
-      netplayStatus = `Address: ${publicAddr}. Exchanging with peer...`;
 
+      netplayStatus = `LAN: ${lanAddr} | Public: ${publicAddr}`;
+
+      // Send BOTH addresses so peer can try LAN first (same-WiFi)
       await sendSignal(currentRoomId, playerId, {
         type: "udp_ready",
         port: port,
         publicAddr: publicAddr,
+        lanAddr: lanAddr,
       });
 
       // ══════════════════════════════════════════════
@@ -558,30 +567,46 @@
 
       const unsubSignal = onSignals(currentRoomId, playerId, async (signal: any) => {
         clearTimeout(signalTimeout);
-        if (signal.type === "udp_ready" && (signal.publicAddr || signal.port)) {
-          const peerAddr = signal.publicAddr || `127.0.0.1:${signal.port}`;
+        if (signal.type === "udp_ready" && (signal.publicAddr || signal.lanAddr || signal.port)) {
+          // Try LAN address first (same-WiFi), fall back to public STUN address
+          const peerLan = signal.lanAddr || "";
+          const peerPublic = signal.publicAddr || `127.0.0.1:${signal.port}`;
 
-          netplayStatus = `Connecting to ${peerAddr}...`;
-          try {
-            await invoke("stun_hole_punch", { peerAddress: peerAddr });
-          } catch { /* hole punch is best-effort */ }
+          // Try LAN first, then public
+          let connected = false;
+          for (const addr of [peerLan, peerPublic].filter(Boolean)) {
+            netplayStatus = `Trying ${addr}...`;
+            try {
+              await invoke("stun_hole_punch", { peerAddress: addr });
+            } catch { /* best-effort */ }
 
-          await invoke("netplay_connect", { peerAddress: peerAddr });
-          playSfx("match_found");
+            await invoke("netplay_connect", { peerAddress: addr });
 
-          // ══════════════════════════════════════════════
-          // STEP 4: Sync handshake (verify connection + measure RTT)
-          // ══════════════════════════════════════════════
-          netplayStatus = "Testing connection...";
-          const syncResult: any = await invoke("netplay_sync_test");
+            // Quick sync test to verify this address works
+            netplayStatus = `Testing ${addr}...`;
+            const testResult: any = await invoke("netplay_sync_test");
+            if (testResult.success) {
+              connected = true;
+              netplayStatus = `Connected via ${addr}!`;
+              break;
+            }
+            netplayStatus = `${addr} failed, trying next...`;
+          }
 
-          if (!syncResult.success) {
-            netplayStatus = `Connection test failed (${syncResult.rounds_completed}/5 rounds). Try again.`;
-            error = "Connection test failed. Make sure both players are on the same network or have open NAT.";
+          if (!connected) {
+            netplayStatus = "Connection test failed on all addresses. Check firewall.";
+            error = "Could not reach peer. Both players need to allow HowlingWind through Windows Firewall.";
             connectionState = "idle";
             unsubSignal();
             return;
           }
+
+          playSfx("match_found");
+
+          // ══════════════════════════════════════════════
+          // STEP 4: Measure final RTT
+          // ══════════════════════════════════════════════
+          const syncResult: any = await invoke("netplay_sync_test");
 
           const pingMs = Math.round(syncResult.avg_ping_ms);
           const recDelay = syncResult.recommended_delay;

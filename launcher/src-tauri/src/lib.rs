@@ -1629,6 +1629,25 @@ pub fn run() {
     diagnostics::install_panic_hook();
     diagnostics::log_info("HowlingWind launcher starting");
 
+    // Auto-add Windows Firewall rule for UDP (best-effort, requires admin)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_str = exe.to_string_lossy().to_string();
+            let _ = std::process::Command::new("netsh")
+                .args([
+                    "advfirewall", "firewall", "add", "rule",
+                    &format!("name=HowlingWind UDP"),
+                    "dir=in", "action=allow", "protocol=UDP",
+                    &format!("program={}", exe_str),
+                ])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                .output();
+            diagnostics::log_info("Firewall rule added (or already exists)");
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
