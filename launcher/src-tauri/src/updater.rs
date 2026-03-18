@@ -84,11 +84,23 @@ fn get_app_dir() -> PathBuf {
 /// Check for updates by fetching the remote JSON.
 #[tauri::command]
 pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    crate::diagnostics::log_info(&format!(
+        "[UPDATER] Checking for updates. Current version: {} URL: {}",
+        CURRENT_VERSION, UPDATE_CHECK_URL
+    ));
+
     let response = reqwest::get(UPDATE_CHECK_URL)
         .await
-        .map_err(|e| format!("Failed to check for updates: {}", e))?;
+        .map_err(|e| {
+            crate::diagnostics::log_error(&format!("[UPDATER] Fetch failed: {}", e));
+            format!("Failed to check for updates: {}", e)
+        })?;
 
-    if !response.status().is_success() {
+    let status = response.status();
+    crate::diagnostics::log_info(&format!("[UPDATER] Response status: {}", status));
+
+    if !status.is_success() {
+        crate::diagnostics::log_warn(&format!("[UPDATER] Non-success status: {}", status));
         return Ok(UpdateCheckResult {
             current_version: CURRENT_VERSION.to_string(),
             latest_version: CURRENT_VERSION.to_string(),
@@ -101,9 +113,16 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
     let info: UpdateInfo = response
         .json()
         .await
-        .map_err(|e| format!("Invalid update info: {}", e))?;
+        .map_err(|e| {
+            crate::diagnostics::log_error(&format!("[UPDATER] JSON parse failed: {}", e));
+            format!("Invalid update info: {}", e)
+        })?;
 
     let update_available = is_newer(CURRENT_VERSION, &info.version);
+    crate::diagnostics::log_info(&format!(
+        "[UPDATER] Local={} Remote={} update_available={}",
+        CURRENT_VERSION, info.version, update_available
+    ));
 
     Ok(UpdateCheckResult {
         current_version: CURRENT_VERSION.to_string(),

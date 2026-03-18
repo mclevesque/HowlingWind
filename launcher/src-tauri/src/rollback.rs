@@ -838,10 +838,28 @@ pub fn rollback_start(
     rs.set_over = false;
     rs.ranked = ranked;
 
-    // Check if we have an IPC client (using HowlingWind Dolphin fork)
+    // Wait for IPC client to be ready (background thread may still be connecting)
     let ipc_client = {
-        let ds = dolphin_proc_state.lock().map_err(|e| e.to_string())?;
-        ds.ipc_client.clone()
+        let mut client = None;
+        for attempt in 0..20 {
+            let ds = dolphin_proc_state.lock().map_err(|e| e.to_string())?;
+            if let Some(ref c) = ds.ipc_client {
+                client = Some(c.clone());
+                crate::diagnostics::log_info(&format!(
+                    "IPC client found on attempt {}/20", attempt + 1
+                ));
+                break;
+            }
+            drop(ds); // Release lock before sleeping
+            if attempt == 0 {
+                crate::diagnostics::log_info("Waiting for IPC client to connect...");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if client.is_none() {
+            crate::diagnostics::log_warn("IPC client not available after 10s — falling back to legacy");
+        }
+        client
     };
 
     if let Some(ipc) = ipc_client {

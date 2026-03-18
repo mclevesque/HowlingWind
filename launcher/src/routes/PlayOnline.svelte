@@ -671,9 +671,22 @@
           });
 
           // ══════════════════════════════════════════════
-          // STEP 6: Start rollback engine (both games loaded)
+          // STEP 6: Wait for IPC, then start rollback
           // ══════════════════════════════════════════════
-          netplayStatus = "Both games loaded! Starting rollback...";
+          netplayStatus = "Waiting for IPC connection to Dolphin fork...";
+
+          // Poll until IPC is ready (rollback_start will wait too, but this gives UI feedback)
+          for (let i = 0; i < 20; i++) {
+            try {
+              const status: any = await invoke("get_ipc_status");
+              if (status?.connected) {
+                netplayStatus = "IPC connection ready! Starting rollback...";
+                break;
+              }
+            } catch { /* ignore */ }
+            netplayStatus = `Waiting for IPC connection... (${i + 1}/20)`;
+            await new Promise(r => setTimeout(r, 500));
+          }
 
           try {
             await invoke("rollback_start", {

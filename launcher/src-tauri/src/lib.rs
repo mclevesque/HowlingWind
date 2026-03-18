@@ -328,6 +328,15 @@ fn get_settings(app: tauri::AppHandle) -> AppSettings {
     load_settings(&app)
 }
 
+#[tauri::command]
+fn get_ipc_status(
+    state: tauri::State<'_, Arc<Mutex<DolphinState>>>,
+) -> serde_json::Value {
+    let ds = state.lock().unwrap();
+    let connected = ds.ipc_client.is_some();
+    serde_json::json!({ "connected": connected })
+}
+
 // ── Game scanning ──
 
 fn read_game_id_from_iso(iso_path: &str) -> Option<String> {
@@ -1846,6 +1855,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_settings,
             get_settings,
+            get_ipc_status,
             launch_dolphin,
             stop_dolphin,
             resize_embedded,
