@@ -114,6 +114,23 @@ pub async fn run_ipc_game_loop(
     // is meaningless for sync — only the relative count matters.
     let mut netplay_frame: u32 = 0;
     let mut first_dolphin_frame: Option<u64> = None;
+    let mut last_frame_time = Instant::now();
+    let frame_duration = Duration::from_micros(16667); // ~60fps
+
+    // First: drain any backlogged frame events from Dolphin loading/intro.
+    // These arrive in a burst and would cause the game loop to race ahead
+    // by thousands of frames, consuming all remote inputs as predictions.
+    {
+        crate::diagnostics::log_info("[SYNC] Draining backlogged frame events...");
+        let mut drained = 0u32;
+        loop {
+            match tokio::time::timeout(Duration::from_millis(50), ipc.wait_frame()).await {
+                Ok(Ok(_)) => { drained += 1; }
+                _ => break, // No more backlogged events
+            }
+        }
+        crate::diagnostics::log_info(&format!("[SYNC] Drained {} backlogged frames", drained));
+    }
 
     loop {
         // Check if we should stop
@@ -135,6 +152,27 @@ pub async fn run_ipc_game_loop(
                 continue;
             }
         };
+
+        // Throttle to ~60fps max — if frames arrive faster than real-time
+        // (backlog burst), skip the extras. This prevents racing ahead of
+        // the remote player's input stream.
+        let elapsed = last_frame_time.elapsed();
+        if elapsed < frame_duration {
+            // Frame arrived too fast — drain extras until we're at real-time pace
+            let mut skipped = 0u32;
+            while last_frame_time.elapsed() < frame_duration {
+                match tokio::time::timeout(Duration::from_millis(1), ipc.wait_frame()).await {
+                    Ok(Ok(_)) => { skipped += 1; }
+                    _ => break,
+                }
+            }
+            if skipped > 0 && (netplay_frame <= 10 || netplay_frame % 300 == 0) {
+                crate::diagnostics::log_info(&format!(
+                    "[THROTTLE] F{} skipped {} fast frames", netplay_frame, skipped
+                ));
+            }
+        }
+        last_frame_time = Instant::now();
 
         // Convert absolute Dolphin frame to relative netplay frame
         if first_dolphin_frame.is_none() {

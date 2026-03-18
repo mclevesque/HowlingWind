@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "howlingwind-launcher"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "crc32fast",
  "futures-util",
