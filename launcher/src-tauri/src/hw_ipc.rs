@@ -189,14 +189,26 @@ impl HWClient {
             }
         });
 
-        Ok(Self {
+        let client = Self {
             cmd_tx,
             frame_rx: Arc::new(Mutex::new(frame_rx)),
             resp_rx: Arc::new(Mutex::new(resp_rx)),
             cmd_lock: Mutex::new(()),
             connected,
             current_frame,
-        })
+        };
+
+        // Drain the welcome message ("HOWLINGWIND 1.0") so it doesn't
+        // get confused with a real command response later
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        {
+            let mut rx = client.resp_rx.lock().await;
+            while let Ok(_) = rx.try_recv() {
+                // Discard stale welcome/init messages
+            }
+        }
+
+        Ok(client)
     }
 
     pub fn is_connected(&self) -> bool {
