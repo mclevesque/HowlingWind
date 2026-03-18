@@ -240,7 +240,36 @@ fn auto_detect_paths() -> (String, String) {
         }
     }
 
-    // No hardcoded fallback — rely on relative path detection from exe location
+    // Also check well-known locations for the ISO
+    let extra_iso_dirs = [
+        // Project root games folder
+        PathBuf::from(r"C:\Users\Thehu\Projects\HowlingWind\games"),
+        // Common download/desktop locations
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Downloads"),
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Desktop"),
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Documents"),
+    ];
+
+    for dir in &extra_iso_dirs {
+        if dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(ext) = p.extension() {
+                        if ext.eq_ignore_ascii_case("iso") || ext.eq_ignore_ascii_case("gcm") {
+                            // Check if filename contains "gnt" or "naruto" (case-insensitive)
+                            let name = p.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+                            if name.contains("gnt") || name.contains("naruto") || name.contains("ngnt") {
+                                if !iso_candidates.contains(&p) {
+                                    iso_candidates.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let iso = iso_candidates
         .iter()
@@ -973,6 +1002,74 @@ fn save_gcpad_mapping(pad: u32, mapping: GCPadMapping) -> Result<(), String> {
     Ok(())
 }
 
+/// Swap guest's controller from Port 1 → Port 2.
+/// Reads the [GCPad1] config, copies it to [GCPad2], and clears [GCPad1].
+/// This ensures the guest's physical controller controls P2, not P1.
+#[tauri::command]
+fn swap_controller_to_port2(app: tauri::AppHandle) -> Result<(), String> {
+    let settings = load_settings(&app);
+
+    // Read current Port 1 mapping
+    let port1_mapping = get_gcpad_mapping(1);
+
+    // Write Port 1's mapping to Port 2
+    save_gcpad_mapping(2, port1_mapping.clone())?;
+
+    // Clear Port 1 (set to keyboard/none so physical controller doesn't control P1)
+    let empty_mapping = GCPadMapping {
+        device: "DInput/0/Keyboard Mouse".to_string(),
+        ..Default::default()
+    };
+    save_gcpad_mapping(1, empty_mapping)?;
+
+    // Also write to portable config (next to Dolphin exe)
+    if let Some(portable_path) = gcpad_ini_path_portable(&settings.dolphin_path) {
+        if let Some(parent) = portable_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        // Copy the main config to portable location
+        let main_path = gcpad_ini_path();
+        if main_path.exists() {
+            let content = fs::read_to_string(&main_path).unwrap_or_default();
+            let _ = fs::write(&portable_path, &content);
+        }
+    }
+
+    diagnostics::log_info("Swapped guest controller from Port 1 → Port 2");
+    Ok(())
+}
+
+/// Restore controller to Port 1 (undo the swap when leaving match).
+#[tauri::command]
+fn restore_controller_to_port1(app: tauri::AppHandle) -> Result<(), String> {
+    let settings = load_settings(&app);
+
+    // Read current Port 2 mapping (which was the original Port 1)
+    let port2_mapping = get_gcpad_mapping(2);
+
+    // Write it back to Port 1
+    save_gcpad_mapping(1, port2_mapping)?;
+
+    // Clear Port 2
+    let empty_mapping = GCPadMapping {
+        device: "DInput/0/Keyboard Mouse".to_string(),
+        ..Default::default()
+    };
+    save_gcpad_mapping(2, empty_mapping)?;
+
+    // Sync to portable config
+    if let Some(portable_path) = gcpad_ini_path_portable(&settings.dolphin_path) {
+        let main_path = gcpad_ini_path();
+        if main_path.exists() {
+            let content = fs::read_to_string(&main_path).unwrap_or_default();
+            let _ = fs::write(&portable_path, &content);
+        }
+    }
+
+    diagnostics::log_info("Restored controller back to Port 1");
+    Ok(())
+}
+
 /// Open Dolphin's controller configuration UI (launches Dolphin without a game).
 #[tauri::command]
 fn open_dolphin_config(app: tauri::AppHandle) -> Result<(), String> {
@@ -1452,6 +1549,7 @@ fn launch_dolphin(
     // Detect which game this ISO is so we can apply the right Gecko codes
     let detected_game_id = read_game_id_from_iso(&iso_path)
         .unwrap_or_else(|| GNT4_GAME_ID.to_string());
+    diagnostics::log_info(&format!("Detected game ID: {} from ISO: {}", detected_game_id, iso_path));
 
     // Kill any existing Dolphin process
     {
@@ -1462,6 +1560,18 @@ fn launch_dolphin(
         ds.process = None;
         #[cfg(windows)]
         { ds.embedded_hwnd = None; }
+    }
+
+    // Ensure Dolphin runs in portable mode (reads config from its own User/ folder)
+    {
+        let dolphin = PathBuf::from(&settings.dolphin_path);
+        if let Some(dir) = dolphin.parent() {
+            let portable_txt = dir.join("portable.txt");
+            if !portable_txt.exists() {
+                let _ = fs::write(&portable_txt, "");
+                diagnostics::log_info("Created portable.txt for Dolphin fork");
+            }
+        }
     }
 
     // Auto-configure controller mapping in Dolphin before launch
@@ -1679,6 +1789,8 @@ pub fn run() {
             poll_gamepad,
             get_gcpad_mapping,
             save_gcpad_mapping,
+            swap_controller_to_port2,
+            restore_controller_to_port1,
             open_dolphin_config,
             get_dolphin_devices,
             scan_games,

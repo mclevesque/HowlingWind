@@ -64,7 +64,7 @@ export interface LobbyRoom {
 function generateRoomCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I/O/0/1 for clarity
   let code = "";
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 2; i++) {
     code += chars[Math.floor(Math.random() * chars.length)];
   }
   return code;

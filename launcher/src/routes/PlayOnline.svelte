@@ -617,6 +617,17 @@
           // STEP 5: NOW launch Dolphin (connection is proven)
           // ══════════════════════════════════════════════
           netplayStatus = `Ping ${pingMs}ms. Launching game...`;
+
+          // GUEST: Swap controller from Port 1 → Port 2 before launching Dolphin
+          if (!isHost) {
+            try {
+              await invoke("swap_controller_to_port2");
+              netplayStatus = "Controller set to P2. Launching game...";
+            } catch (e: any) {
+              console.warn("Controller swap failed:", e);
+            }
+          }
+
           await ensureDolphinRunning();
 
           // Signal peer that our Dolphin is ready
@@ -634,21 +645,6 @@
             // Timeout after 60s
             setTimeout(() => { unsub2(); resolve(); }, 60000);
           });
-
-          // ══════════════════════════════════════════════
-          // STEP 5.5: Skip intros on both machines
-          // ══════════════════════════════════════════════
-          netplayStatus = "Skipping intros...";
-          // Inject Start button presses to skip through intro animations
-          // This ensures both machines reach the same menu state
-          for (let i = 0; i < 5; i++) {
-            try {
-              await invoke("ipc_inject_start_press");
-            } catch { /* IPC might not support this yet */ }
-            await new Promise(r => setTimeout(r, 500));
-          }
-          // Wait a moment for both to stabilize at title screen
-          await new Promise(r => setTimeout(r, 1000));
 
           // ══════════════════════════════════════════════
           // STEP 6: Start rollback engine (both games loaded)
@@ -760,6 +756,10 @@
       await invoke("rollback_stop");
       await invoke("netplay_stop");
       await invoke("dolphin_mem_detach");
+      // Restore guest's controller back to Port 1
+      if (!isHost) {
+        await invoke("restore_controller_to_port1");
+      }
     } catch {}
     connectionState = "idle";
     netplayStatus = "";

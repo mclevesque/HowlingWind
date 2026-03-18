@@ -263,20 +263,25 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 5: Inject remote input + handle P2 routing ──
+        // ── Step 5: Inject BOTH players' inputs via IPC every frame ──
+        // This is critical: we override ALL controller ports so the physical
+        // controller doesn't bleed through. The guest's physical controller
+        // is on port 0 but they need to be P2 (port 1).
         {
             let mut np = netplay_state.lock().unwrap();
             if let Some(session) = &mut np.session {
                 let (remote_input, is_predicted) = session.input_buffer.get_remote(current_frame);
                 let remote_pad = frame_input_to_pad(&remote_input);
+                let local_pad = frame_input_to_pad(&local_frame_input);
 
-                // Inject remote player's input on their port
-                let _ = ipc.set_input(remote_player as u32, &remote_pad).await;
-
-                // CRITICAL: If we're the GUEST (P2), our physical controller is port 0
-                // but we need to be P2 (port 1). Redirect our input to port 1.
-                if local_player == 1 {
-                    let local_pad = frame_input_to_pad(&local_frame_input);
+                if local_player == 0 {
+                    // HOST: local = P1 (port 0), remote = P2 (port 1)
+                    let _ = ipc.set_input(0, &local_pad).await;
+                    let _ = ipc.set_input(1, &remote_pad).await;
+                } else {
+                    // GUEST: remote = P1 (port 0), local = P2 (port 1)
+                    // This BLOCKS the physical controller from controlling P1!
+                    let _ = ipc.set_input(0, &remote_pad).await;
                     let _ = ipc.set_input(1, &local_pad).await;
                 }
 
