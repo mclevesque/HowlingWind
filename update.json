@@ -1,5 +1,5 @@
 {
-  "version": "0.3.2",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.2/HowlingWind-v0.3.2.zip",
-  "notes": "v0.3.2 - Try LAN first for same-WiFi, auto-firewall rule"
+  "version": "0.3.3",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.3/HowlingWind-v0.3.3.zip",
+  "notes": "v0.3.3 - Try Fix IPC runtime death, LAN-first, intro skip"
 }

@@ -137,6 +137,8 @@ struct DolphinState {
     embedded_hwnd: Option<SendHwnd>,
     /// IPC client connected to our HowlingWind Dolphin fork (if using fork)
     ipc_client: Option<Arc<hw_ipc::HWClient>>,
+    /// Keep the IPC runtime alive so reader/writer tasks don't get killed
+    ipc_runtime: Option<tokio::runtime::Runtime>,
 }
 
 fn settings_path(app: &tauri::AppHandle) -> PathBuf {
@@ -1483,20 +1485,27 @@ fn launch_dolphin(
         let state_ipc = Arc::clone(state.inner());
         let app_ipc = app.clone();
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            // Create a MULTI-THREADED runtime that stays alive
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
                 .enable_all()
                 .build()
-                .expect("Failed to create tokio runtime for IPC connect");
-            rt.block_on(async move {
-            // Wait a moment for the IPC server to start inside Dolphin
-            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                .expect("Failed to create tokio runtime for IPC");
 
-            match hw_ipc::HWClient::connect(10000).await {
+            let client_result = rt.block_on(async {
+                // Wait a moment for the IPC server to start inside Dolphin
+                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                hw_ipc::HWClient::connect(10000).await
+            });
+
+            match client_result {
                 Ok(client) => {
                     crate::diagnostics::log_ipc("Connected to HowlingWind Dolphin fork");
                     let client = Arc::new(client);
                     if let Ok(mut ds) = state_ipc.lock() {
                         ds.ipc_client = Some(client);
+                        // CRITICAL: Store the runtime so reader/writer tasks stay alive!
+                        ds.ipc_runtime = Some(rt);
                     }
                     // Notify frontend that IPC is ready
                     use tauri::Emitter;
@@ -1509,7 +1518,6 @@ fn launch_dolphin(
                     // Not fatal — we fall back to external memory approach
                 }
             }
-            }); // end block_on
         }); // end thread::spawn
     }
 
@@ -1656,6 +1664,7 @@ pub fn run() {
             #[cfg(windows)]
             embedded_hwnd: None,
             ipc_client: None,
+            ipc_runtime: None,
         })))
         .manage(Arc::new(Mutex::new(netplay::NetplayState::new())))
         .manage(Arc::new(Mutex::new(dolphin_mem::DolphinMemState::new())))

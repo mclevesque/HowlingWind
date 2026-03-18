@@ -636,6 +636,21 @@
           });
 
           // ══════════════════════════════════════════════
+          // STEP 5.5: Skip intros on both machines
+          // ══════════════════════════════════════════════
+          netplayStatus = "Skipping intros...";
+          // Inject Start button presses to skip through intro animations
+          // This ensures both machines reach the same menu state
+          for (let i = 0; i < 5; i++) {
+            try {
+              await invoke("ipc_inject_start_press");
+            } catch { /* IPC might not support this yet */ }
+            await new Promise(r => setTimeout(r, 500));
+          }
+          // Wait a moment for both to stabilize at title screen
+          await new Promise(r => setTimeout(r, 1000));
+
+          // ══════════════════════════════════════════════
           // STEP 6: Start rollback engine (both games loaded)
           // ══════════════════════════════════════════════
           netplayStatus = "Both games loaded! Starting rollback...";
