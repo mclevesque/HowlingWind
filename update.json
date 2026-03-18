@@ -1,5 +1,5 @@
 {
-  "version": "0.3.9",
-  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.3.9/HowlingWind-v0.3.9.zip",
-  "notes": "v0.3.9 - Fix IPC death from save states, filter test packets"
+  "version": "0.4.0",
+  "url": "https://github.com/mclevesque/HowlingWind/releases/download/v0.4.0/HowlingWind-v0.4.0.zip",
+  "notes": "v0.4.0 - Fix IPC death from save states, filter test packets"
 }

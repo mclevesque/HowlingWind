@@ -323,42 +323,34 @@ pub async fn run_ipc_game_loop(
             }
         }
 
-        // ── Step 5: Inject BOTH players' inputs via IPC every frame ──
-        // This is critical: we override ALL controller ports so the physical
-        // controller doesn't bleed through. The guest's physical controller
-        // is on port 0 but they need to be P2 (port 1).
+        // ── Step 5: Inject ONLY the remote player's input via IPC ──
+        // DO NOT override the local player's port — let the physical controller
+        // drive it naturally. Overriding it creates a feedback loop (we read back
+        // our own injected zeros from memory, killing the controller).
+        //
+        // HOST (P1): physical controller → port 0 naturally. Inject remote → port 1.
+        // GUEST (P2): physical controller → port 0 naturally (controls P1 on their screen).
+        //             Inject remote → port 1 (host appears as P2 on guest's screen).
+        //             NOTE: Guest sees themselves as P1 locally — player assignment
+        //             is handled by which side's input goes where over the network.
         {
             let mut np = netplay_state.lock().unwrap();
             if let Some(session) = &mut np.session {
                 let (remote_input, is_predicted) = session.input_buffer.get_remote(current_frame);
                 let remote_pad = frame_input_to_pad(&remote_input);
-                let local_pad = frame_input_to_pad(&local_frame_input);
 
                 if verbose {
                     crate::diagnostics::log_info(&format!(
-                        "[INJECT] F{} local_btns=0x{:04X} remote_btns=0x{:04X} predicted={} P{}=local P{}=remote",
-                        current_frame, local_frame_input.buttons, remote_input.buttons,
-                        is_predicted, local_player + 1, remote_player + 1
+                        "[INJECT] F{} remote_btns=0x{:04X} predicted={} → port {}",
+                        current_frame, remote_input.buttons,
+                        is_predicted, remote_player
                     ));
                 }
 
-                if local_player == 0 {
-                    // HOST: local = P1 (port 0), remote = P2 (port 1)
-                    if let Err(e) = ipc.set_input(0, &local_pad).await {
-                        crate::diagnostics::log_error(&format!("[INJECT] set_input(0) failed: {}", e));
-                    }
-                    if let Err(e) = ipc.set_input(1, &remote_pad).await {
-                        crate::diagnostics::log_error(&format!("[INJECT] set_input(1) failed: {}", e));
-                    }
-                } else {
-                    // GUEST: remote = P1 (port 0), local = P2 (port 1)
-                    // This BLOCKS the physical controller from controlling P1!
-                    if let Err(e) = ipc.set_input(0, &remote_pad).await {
-                        crate::diagnostics::log_error(&format!("[INJECT] set_input(0) failed: {}", e));
-                    }
-                    if let Err(e) = ipc.set_input(1, &local_pad).await {
-                        crate::diagnostics::log_error(&format!("[INJECT] set_input(1) failed: {}", e));
-                    }
+                // Only inject the REMOTE player's input
+                let remote_port = remote_player as u32;
+                if let Err(e) = ipc.set_input(remote_port, &remote_pad).await {
+                    crate::diagnostics::log_error(&format!("[INJECT] set_input({}) failed: {}", remote_port, e));
                 }
 
                 // Track prediction stats
