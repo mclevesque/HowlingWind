@@ -771,11 +771,17 @@ fn ensure_gcpad_config(dolphin_path: &str) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        // Only write if no existing config at all
-        let should_write = !path.exists();
+        // Write if no config exists, OR if existing config only has keyboard defaults
+        let should_write = if !path.exists() {
+            true
+        } else {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            !content.contains("SDL") && !content.contains("XInput") && !content.contains("GameCube Adapter")
+        };
 
         if should_write {
             let _ = fs::write(&path, &output);
+            diagnostics::log_info(&format!("Wrote controller config to {}", path.display()));
         }
     }
 }
@@ -1563,6 +1569,7 @@ fn launch_dolphin(
     }
 
     // Ensure Dolphin runs in portable mode (reads config from its own User/ folder)
+    // AND copy controller config from AppData if portable config has keyboard defaults
     {
         let dolphin = PathBuf::from(&settings.dolphin_path);
         if let Some(dir) = dolphin.parent() {
@@ -1570,6 +1577,32 @@ fn launch_dolphin(
             if !portable_txt.exists() {
                 let _ = fs::write(&portable_txt, "");
                 diagnostics::log_info("Created portable.txt for Dolphin fork");
+            }
+
+            // Copy controller config from AppData → portable if portable has keyboard defaults
+            let portable_gcpad = dir.join("User").join("Config").join("GCPadNew.ini");
+            let appdata = std::env::var("APPDATA").unwrap_or_default();
+            let appdata_gcpad = PathBuf::from(&appdata).join("Dolphin Emulator").join("Config").join("GCPadNew.ini");
+
+            let portable_has_real_controller = if portable_gcpad.exists() {
+                let content = fs::read_to_string(&portable_gcpad).unwrap_or_default();
+                content.contains("SDL") || content.contains("XInput") || content.contains("GameCube Adapter")
+            } else {
+                false
+            };
+
+            if !portable_has_real_controller {
+                // Try to copy from AppData (user's existing Dolphin config)
+                if appdata_gcpad.exists() {
+                    let content = fs::read_to_string(&appdata_gcpad).unwrap_or_default();
+                    if content.contains("SDL") || content.contains("XInput") {
+                        if let Some(parent) = portable_gcpad.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        let _ = fs::write(&portable_gcpad, &content);
+                        diagnostics::log_info("Copied controller config from AppData to portable");
+                    }
+                }
             }
         }
     }
